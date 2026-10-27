@@ -1,0 +1,39 @@
+# Копия для открытого репозитория nikidav9/inst: .github/workflows/telegram-relay.yml,
+# рядом в корне inst — копия scripts/telegram_relay.py (решение владельца 27.10.2026).
+#
+# С сервера jobtoo.ru и с jobtoo-ci (Россия) t.me не открывается, а минуты GitHub
+# в закрытом Jobbbrbeb не оплачены. В открытом репозитории машины GitHub бесплатны:
+# здесь витрины каналов скачиваются и отправляются на jobtoo.ru, разбор — заданием
+# telegram в career-ingest.yml (02:30, 08:30, 14:30, 20:30 UTC), за 50 минут до него.
+#
+# Секрет RELAY_KEY в inst — ключ только для присылки каналов (на сервере его
+# sha256, TG_RELAY_KEY_SHA256 в telegram_source.php), заводит владелец. Запуск только по расписанию,
+# вручную и по push в main — чужие PR и форки секрета не видят. В лог идут только
+# имена каналов и итог, токен не печатается.
+name: Telegram-каналы для jobtoo.ru
+
+on:
+  schedule:
+    - cron: '40 1,7,13,19 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['telegram_relay.py', '.github/workflows/telegram-relay.yml', 'relay-now']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-relay
+  cancel-in-progress: false
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Прислать витрины каналов на сервер
+        env:
+          RELAY_KEY: ${{ secrets.RELAY_KEY }}
+        run: python3 telegram_relay.py | tee -a "$GITHUB_STEP_SUMMARY"
