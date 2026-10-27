@@ -34,6 +34,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Прислать витрины каналов на сервер
+        # shell: bash — это -o pipefail: иначе | tee прячет падение скрипта.
+        shell: bash
         env:
           RELAY_KEY: ${{ secrets.RELAY_KEY }}
         run: python3 telegram_relay.py | tee -a "$GITHUB_STEP_SUMMARY"
