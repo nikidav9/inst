@@ -100,7 +100,8 @@ def api(url, token, data=None):
 
 def main():
     dry = '--dry-run' in sys.argv
-    token = os.environ.get('RELAY_KEY') or os.environ.get('ADMIN_TOKEN', '')
+    # strip: секрет, вставленный из файла, приходит с переводом строки на конце.
+    token = (os.environ.get('RELAY_KEY') or os.environ.get('ADMIN_TOKEN', '')).strip()
     handles = [a for a in sys.argv[1:] if not a.startswith('--')]
     if handles:
         channels = [{'handle': h, 'since': 0} for h in handles]
