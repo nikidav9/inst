@@ -76,18 +76,24 @@ def http_get(url: str, post: bool = False, body: str = None, headers: list = Non
                 return None
             if e.code != 429 and e.code < 500:
                 return None
-        except (urllib.error.URLError, TimeoutError):
+        except Exception:
             pass
-        time.sleep(3 * (attempt + 1))
+        time.sleep(2 * (attempt + 1))
     return None
 
 
 def api(url: str, token: str, data: bytes = None):
     auth = {'X-Relay-Key': token} if os.environ.get('RELAY_KEY') else {'X-Admin-Token': token}
     headers = {**auth, 'Content-Type': 'application/octet-stream'}
-    req = urllib.request.Request(url, data=data, method='POST' if data is not None else 'GET', headers=headers)
-    with urllib.request.urlopen(req, timeout=120) as r:
-        return json.loads(r.read().decode('utf-8'))
+    for attempt in range(3):
+        req = urllib.request.Request(url, data=data, method='POST' if data is not None else 'GET', headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                return json.loads(r.read().decode('utf-8'))
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as e:
+            if attempt == 2:
+                raise
+            time.sleep(2 * (attempt + 1))
 
 
 def with_query_param(url: str, param: str, val) -> str:
@@ -118,7 +124,6 @@ def fetch_and_send_unit(u: dict, token: str, dry: bool = False):
 
     # Если есть пагинация типа page:
     if ptype == 'page' and param:
-        # Для начала берем первые max_pages страниц
         for p in range(start + 1, start + max_pages):
             pages_to_fetch.append(with_query_param(base_url, param, p))
     elif ptype == 'offset' and param and limit:
@@ -130,12 +135,10 @@ def fetch_and_send_unit(u: dict, token: str, dry: bool = False):
     for idx, page_url in enumerate(pages_to_fetch):
         content = http_get(page_url, post=post, body=body, headers=headers, xhr=xhr)
         if not content:
-            # Если страница 0 не ответила — ошибка, если последующие страницы — конец списка
             if idx == 0:
                 return host, 'сайт не ответил на первый запрос', pages_sent
             break
 
-        # Проверка на пустой ответ для последующих страниц
         if idx > 0 and len(content) < 50:
             break
 
@@ -180,8 +183,12 @@ def main():
     print(f'Получено карьерных эндпоинтов: {len(endpoints)}')
 
     def worker(u):
-        h, status, pages = fetch_and_send_unit(u, token, dry=dry)
-        return h, status, pages
+        try:
+            h, status, pages = fetch_and_send_unit(u, token, dry=dry)
+            return h, status, pages
+        except Exception as e:
+            host = urllib.parse.urlsplit(u.get('url', '')).hostname or 'unknown'
+            return host, f'неожиданный сбой: {e}', 0
 
     total_pages = 0
     with ThreadPoolExecutor(max_workers=8) as pool:
