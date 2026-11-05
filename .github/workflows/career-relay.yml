@@ -1,0 +1,39 @@
+# Копия для открытого репозитория nikidav9/inst: .github/workflows/career-relay.yml,
+# рядом в корне inst — копия scripts/career_relay.py (ноябрь 2026).
+#
+# С сервера jobtoo.ru запросы к карьерным сайтам создают многочасовую нагрузку,
+# а часть зарубежных систем найма блокирует российские IP. В открытом репозитории
+# машины GitHub бесплатны: здесь страницы карьерных сайтов скачиваются и отправляются
+# на jobtoo.ru, разбор — заданием career-ingest.yml (02:30, 08:30, 14:30, 20:30 UTC),
+# за 50 минут до него.
+#
+# Секрет RELAY_KEY в inst — общий ключ для присылки (sha256 на сервере).
+# Запуск только по расписанию, вручную и по push в main.
+name: Карьерные сайты для jobtoo.ru
+
+on:
+  schedule:
+    - cron: '40 1,7,13,19 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['career_relay.py', '.github/workflows/career-relay.yml', 'career-relay-now']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: career-relay
+  cancel-in-progress: false
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Прислать страницы карьерных сайтов на сервер
+        shell: bash
+        env:
+          RELAY_KEY: ${{ secrets.RELAY_KEY }}
+        run: python3 career_relay.py | tee -a "$GITHUB_STEP_SUMMARY"
