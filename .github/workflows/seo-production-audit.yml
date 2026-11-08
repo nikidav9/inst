@@ -1,0 +1,29 @@
+# Черновик для nikidav9/inst: .github/workflows/seo-production-audit.yml
+# Аудит живого SEO jobtoo.ru. Секретов нет. ТРЕБУЕТ скопировать в inst scripts/seo-production-audit.py
+# (313 строк, только stdlib Python, ходит на публичные страницы — копия безопасна).
+name: Production SEO audit
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: jobtoo-production-seo-audit
+  cancel-in-progress: true
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Проверить живой SEO-контур
+        run: python3 scripts/seo-production-audit.py --base https://jobtoo.ru --samples 12 --json "$RUNNER_TEMP/seo-production-report.json"
+      - name: Сохранить отчёт
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-seo-${{ github.run_id }}
+          path: ${{ runner.temp }}/seo-production-report.json
+          if-no-files-found: warn
+          retention-days: 30

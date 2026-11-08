@@ -1,0 +1,48 @@
+# Черновик для nikidav9/inst: .github/workflows/diagnose-vacancy-feeds.yml
+# Разовая диагностика ленты «Россия/за рубежом». Секретов нет вовсе: анонимная сессия
+# (api/session.php) + dbGetExtFeed — публичные вакансии. Печатаются только коды, время и счётчики.
+# Только ручной запуск (в закрытом репозитории он ещё шёл после каждой выкладки).
+name: Диагностика лент вакансий
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Проверить сессию и обе ленты
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, time, urllib.request, urllib.error
+          base = 'https://jobtoo.ru'
+          ua = 'Mozilla/5.0 (compatible; jobtoo-inst-probe)'
+          def request(path, payload=None, token=None):
+              h = {'User-Agent': ua, 'Accept': 'application/json', 'Origin': 'https://jobtoo.ru'}
+              if payload is not None:
+                  h.update({'Content-Type': 'application/json', 'X-Session-Token': token or '', 'X-App-Secret': token or ''})
+              req = urllib.request.Request(base+path, data=json.dumps(payload).encode() if payload is not None else None, headers=h, method='POST' if payload is not None else 'GET')
+              t = time.monotonic()
+              try:
+                  with urllib.request.urlopen(req, timeout=28) as r: raw, st = r.read(1000000), r.status
+              except urllib.error.HTTPError as e: raw, st = e.read(1000000), e.code
+              except Exception as e:
+                  print(f'error={type(e).__name__}'); return None, None
+              ms = int((time.monotonic()-t)*1000)
+              try: obj = json.loads(raw)
+              except ValueError:
+                  print(f'http={st}; ms={ms}; non_json; bytes={len(raw)}'); return st, None
+              data = obj.get('data') if isinstance(obj, dict) else None
+              items = data.get('items') if isinstance(data, dict) else data if isinstance(data, list) else None
+              print(f'http={st}; ms={ms}; items={len(items) if isinstance(items, list) else "?"}')
+              return st, obj
+          st, s = request('/api/session.php')
+          tok = s.get('session_token') if isinstance(s, dict) else None
+          if not tok: print('Нет session_token'); raise SystemExit(1)
+          for abroad in (False, True):
+              print('ЛЕНТА ' + ('ЗА РУБЕЖОМ' if abroad else 'РОССИЯ'))
+              args = [60, [], {'salary_from':None,'specs':[],'levels':[],'formats':[],'companies':[],'posted':None,'query':'','salary_known':False,'hide_seen':True,'abroad':abroad,'countries':[],'work_modes':[],'source':'all','city':'Москва'}]
+              request('/api/db.php', {'fn':'dbGetExtFeed','args':args}, tok)
+          PY
