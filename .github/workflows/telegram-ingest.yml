@@ -1,0 +1,43 @@
+# Копия для открытого репозитория nikidav9/inst: .github/workflows/telegram-ingest.yml
+# (08.11.2026, решение владельца: весь сбор вакансий идёт через inst). Разбор присланных
+# telegram-relay страниц: повторные GET ingest.php?kind=telegram, пока сервер отвечает
+# «продолжение». Ключ — секрет RELAY_KEY (на сервере tg_run_key_ok). Журнал публичный:
+# печатаем только число каналов и имена с ошибками.
+name: Разбор Telegram-каналов
+
+on:
+  schedule:
+    - cron: '30 2,8,14,20 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['telegram-ingest-now']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-ingest
+  cancel-in-progress: false
+
+jobs:
+  telegram:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Вызвать ingest.php?kind=telegram
+        shell: bash
+        env:
+          RELAY_KEY: ${{ secrets.RELAY_KEY }}
+        run: |
+          [ -n "$RELAY_KEY" ] || { echo "RELAY_KEY не задан в секретах inst"; exit 1; }
+          URL="https://jobtoo.ru/api/ingest.php?kind=telegram"
+          for attempt in $(seq 1 400); do
+            RESP=$(curl -fsS "$URL" -H "X-Relay-Key: $RELAY_KEY" --max-time 150) || RESP=''
+            echo "Вызов $attempt: ${RESP:0:120}"
+            if [ -z "$RESP" ]; then sleep 15; continue; fi
+            if echo "$RESP" | grep -q '"продолжение'; then sleep 2; continue; fi
+            echo "$RESP" | python3 -c 'import json,sys; r=json.load(sys.stdin)["run"]; bad=[x for x in r if not str(x.get("status","")).startswith("ок")]; print("Каналов в последнем вызове:", len(r), "не ок:", len(bad)); [print(" ", x["name"], "—", x["status"]) for x in bad[:30]]' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          done
+          echo "Сбор каналов не завершился за 400 вызовов"; exit 1

@@ -1,0 +1,117 @@
+# Копия для открытого репозитория nikidav9/inst: .github/workflows/career-ingest.yml
+# (08.11.2026, решение владельца: весь сбор вакансий идёт через inst, Timeweb не нужен).
+#
+# Три шага, как раньше в закрытом Jobbbrbeb/career-ingest.yml: обход ingest.php, дочитывание
+# описаний describe.php, проверка ссылок link_check.php. Сервер разбирает присланные career-relay
+# страницы сам, здесь только повторные GET-вызовы. Ключ — секрет RELAY_KEY (тот же, что у
+# присылки; на сервере открывает только GET этих трёх скриптов, tg_run_key_ok).
+# Журнал публичный: печатаем только начало ответа, не весь JSON.
+# Предел задания GitHub — 6 часов: круг дочитывается с checkpoint следующим заходом.
+name: Сбор вакансий с карьерных сайтов
+
+on:
+  schedule:
+    - cron: '30 2,8,14,20 * * *'
+    - cron: '45 */3 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Перезабрать даже если period_min не прошёл'
+        type: boolean
+        default: false
+      scope:
+        description: 'api — только адреса с API; пусто — полный круг'
+        default: ''
+  push:
+    branches: [main]
+    paths: ['career-ingest-now']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: career-ingest-${{ (github.event.schedule == '45 */3 * * *' || github.event.inputs.scope == 'api') && 'api' || 'full' }}
+  cancel-in-progress: false
+
+env:
+  API_ONLY: ${{ (github.event.schedule == '45 */3 * * *' || github.event.inputs.scope == 'api') && '1' || '' }}
+
+jobs:
+  ingest:
+    name: Обход сайтов
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Вызвать ingest.php
+        shell: bash
+        env:
+          RELAY_KEY: ${{ secrets.RELAY_KEY }}
+          FORCE: ${{ github.event.inputs.force == 'true' && '1' || (github.event_name == 'push' && '1') || '' }}
+        run: |
+          [ -n "$RELAY_KEY" ] || { echo "RELAY_KEY не задан в секретах inst"; exit 1; }
+          URL="https://jobtoo.ru/api/ingest.php?source=career_owner"
+          [ -n "$FORCE" ] && URL="${URL}&force=1"
+          [ -n "$API_ONLY" ] && URL="${URL}&scope=api"
+          END=$(( $(date +%s) + 340*60 ))
+          for attempt in $(seq 1 400); do
+            RESP=$(curl -fsS "$URL" -H "X-Relay-Key: $RELAY_KEY" --max-time 600) || RESP=''
+            echo "Вызов $attempt: ${RESP:0:200}"
+            if [ -z "$RESP" ]; then sleep 15; continue; fi
+            if echo "$RESP" | grep -q '"продолжение'; then
+              if [ "$(date +%s)" -gt "$END" ]; then echo "Предел 6 часов: круг дочитает следующий заход (checkpoint)"; exit 0; fi
+              sleep 5; continue
+            fi
+            echo "Обход завершён"
+            if echo "$RESP" | grep -q '"status":"ошибка'; then
+              echo "Круг оборван ошибкой — пропавшие вакансии на нём не гасились"; exit 1
+            fi
+            exit 0
+          done
+          echo "ingest.php не завершился за 400 вызовов"; exit 1
+
+  describe:
+    name: Дочитать описания
+    needs: ingest
+    if: ${{ always() && github.event.schedule != '45 */3 * * *' && github.event.inputs.scope != 'api' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    continue-on-error: true
+    steps:
+      - name: Вызвать describe.php
+        shell: bash
+        env:
+          RELAY_KEY: ${{ secrets.RELAY_KEY }}
+        run: |
+          [ -n "$RELAY_KEY" ] || { echo "RELAY_KEY не задан"; exit 1; }
+          for attempt in $(seq 1 150); do
+            RESP=$(curl -fsS "https://jobtoo.ru/api/describe.php" -H "X-Relay-Key: $RELAY_KEY" --max-time 120) || RESP=''
+            REM=$(echo "$RESP" | grep -oE '"remaining":[0-9]+' | grep -oE '[0-9]+')
+            echo "Вызов $attempt: осталось ${REM:-?}"
+            if [ -z "$RESP" ]; then sleep 5; continue; fi
+            if [ -z "$REM" ] || [ "$REM" = "0" ]; then echo "Очередь дочитана"; exit 0; fi
+            sleep 5
+          done
+          echo "Очередь не опустела за 150 вызовов — доберёт следующий заход"
+
+  links:
+    name: Проверить ссылки вакансий
+    needs: [ingest, describe]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    continue-on-error: true
+    steps:
+      - name: Вызвать link_check.php
+        shell: bash
+        env:
+          RELAY_KEY: ${{ secrets.RELAY_KEY }}
+        run: |
+          [ -n "$RELAY_KEY" ] || { echo "RELAY_KEY не задан"; exit 1; }
+          for attempt in $(seq 1 20); do
+            RESP=$(curl -fsS "https://jobtoo.ru/api/link_check.php" -H "X-Relay-Key: $RELAY_KEY" --max-time 120) || RESP=''
+            REM=$(echo "$RESP" | grep -oE '"remaining":[0-9]+' | grep -oE '[0-9]+')
+            echo "Вызов $attempt: осталось ${REM:-?}"
+            if [ -z "$RESP" ]; then sleep 5; continue; fi
+            if [ -z "$REM" ] || [ "$REM" = "0" ]; then echo "Ссылки проверены"; exit 0; fi
+            sleep 5
+          done
