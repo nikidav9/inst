@@ -1,0 +1,28 @@
+# Копия infra/inst/seo-weekly-report.yml из Jobbbrbeb. Секретов нет.
+# Секретов нет. ТРЕБУЕТ скопировать в inst scripts/seo-weekly-report.py (только stdlib, публичные страницы).
+name: SEO weekly report
+on:
+  schedule:
+    - cron: '41 6 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: jobtoo-seo-weekly-report
+  cancel-in-progress: true
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Собрать отчёт
+        run: python3 scripts/seo-weekly-report.py --base https://jobtoo.ru --json "$RUNNER_TEMP/seo-weekly.json" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Сохранить отчёт
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seo-weekly-${{ github.run_id }}
+          path: ${{ runner.temp }}/seo-weekly.json
+          if-no-files-found: warn
+          retention-days: 60
