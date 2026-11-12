@@ -1,0 +1,40 @@
+# Копия для открытого репозитория nikidav9/inst: .github/workflows/linkedin-relay.yml,
+# рядом в корне inst — копия infra/linkedin-worker.py (ноябрь 2026).
+#
+# РЕШЕНИЕ ВЛАДЕЛЬЦА 12.11.2026: с московского сервера LinkedIn не открывается (сброс соединения),
+# поэтому тот же сборщик (гостевой поиск, только поля вакансии, честный User-Agent, ≤ 12 запросов
+# с паузой 6 с, остановка на первой блокировке) запускается здесь, на адресе GitHub вне России,
+# и присылает готовый фид на jobtoo.ru (ingest.php?kind=linkedin_relay). Блокировку LinkedIn
+# обходить нельзя: если и этот адрес закрыт, запуск завершается красным, а не молча зелёным.
+#
+# Секрет RELAY_KEY в inst — общий ключ присылки (как у career-relay). Запуск: по расписанию (каждые 4 часа),
+# вручную и по push строки в файл linkedin-relay-now.
+name: LinkedIn для jobtoo.ru
+
+on:
+  schedule:
+    - cron: '20 */4 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['linkedin-worker.py', '.github/workflows/linkedin-relay.yml', 'linkedin-relay-now']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linkedin-relay
+  cancel-in-progress: false
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Собрать вакансии LinkedIn и прислать на сервер
+        shell: bash
+        env:
+          LINKEDIN_RELAY_URL: https://jobtoo.ru/api/ingest.php?kind=linkedin_relay
+          RELAY_KEY: ${{ secrets.RELAY_KEY }}
+        run: python3 linkedin-worker.py 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"; exit "${PIPESTATUS[0]}"
