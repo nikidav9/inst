@@ -32,7 +32,7 @@ OUT = os.environ.get("LINKEDIN_FEED", "/var/www/html/linkedin-feed.json")
 # (сброс соединения), поэтому сборщик запускается в GitHub Actions (nikidav9/inst, адрес вне России)
 # и шлёт готовый фид на сервер. Ключ присылки — секрет RELAY_KEY. Без LINKEDIN_RELAY_URL — прежний режим.
 RELAY_URL = os.environ.get("LINKEDIN_RELAY_URL", "")
-RELAY_KEY = os.environ.get("RELAY_KEY", "")
+RELAY_KEY = os.environ.get("RELAY_KEY", "").strip()  # секрет из GitHub с \n на конце: http.client отвергает такой заголовок
 # (ключевые слова, место). Немного и по делу: цель — IT/digital/офис в России и русскоязычные зарубежные.
 QUERIES = [
     ("python developer", "Russia"), ("frontend developer", "Russia"), ("product manager", "Russia"),
