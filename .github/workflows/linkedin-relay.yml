@@ -42,3 +42,23 @@ jobs:
           LINKEDIN_RELAY_URL: https://jobtoo.ru/api/ingest.php?kind=linkedin_relay
           RELAY_KEY: ${{ secrets.RELAY_KEY }}
         run: python3 linkedin-worker.py 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"; exit "${PIPESTATUS[0]}"
+      - name: Запустить приём фида на сайте (вакансии в базу и ленту)
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          RELAY_KEY: ${{ secrets.RELAY_KEY }}
+        run: |
+          # 12.11.2026: фид лежал на сайте, но источник `linkedin` не звал никто (career-ingest ходит только за
+          # career_owner, telegram-ingest только за каналами), и в ленте было 0 вакансий LinkedIn.
+          KEY=$(printf %s "$RELAY_KEY" | tr -d '\r\n')
+          [ -n "$KEY" ] || { echo "RELAY_KEY не задан в секретах inst"; exit 1; }
+          URL="https://jobtoo.ru/api/ingest.php?source=linkedin&force=1"
+          for attempt in 1 2 3 4 5 6; do
+            RESP=$(curl -fsS "$URL" -H "X-Relay-Key: $KEY" --max-time 300) || RESP=''
+            echo "Вызов $attempt: ${RESP:0:400}" | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ -z "$RESP" ]; then sleep 20; continue; fi
+            if echo "$RESP" | grep -q '"продолжение'; then sleep 10; continue; fi
+            if echo "$RESP" | grep -q '"status":"ошибка'; then echo "Приём вернул ошибку"; exit 1; fi
+            exit 0
+          done
+          echo "Приём не завершился за 6 вызовов"; exit 1
