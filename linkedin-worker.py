@@ -6,7 +6,8 @@
   * только поля самой вакансии: название, компания, город, дата, ссылка. Данные
     рекрутёров не берём и не храним;
   * честный User-Agent (под браузер не маскируемся), пауза между запросами, потолок
-    запросов за запуск;
+    запросов за запуск; с 12.11.2026 список поисков делится на 8 кусков, каждый запуск (раз в 3 часа)
+    берёт свой, за сутки ~96 запросов;
   * первая же блокировка (429/999/403, страница входа) останавливает запуск, прошлый
     фид остаётся как был.
 Только стандартная библиотека. Результат: LINKEDIN_FEED (nginx отдаёт его как
@@ -16,6 +17,7 @@ import gzip
 import html
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -33,15 +35,54 @@ OUT = os.environ.get("LINKEDIN_FEED", "/var/www/html/linkedin-feed.json")
 # и шлёт готовый фид на сервер. Ключ присылки — секрет RELAY_KEY. Без LINKEDIN_RELAY_URL — прежний режим.
 RELAY_URL = os.environ.get("LINKEDIN_RELAY_URL", "")
 RELAY_KEY = os.environ.get("RELAY_KEY", "").strip()  # секрет из GitHub с \n на конце: http.client отвергает такой заголовок
-# (ключевые слова, место). Немного и по делу: цель — IT/digital/офис в России и русскоязычные зарубежные.
-QUERIES = [
-    ("python developer", "Russia"), ("frontend developer", "Russia"), ("product manager", "Russia"),
-    ("data analyst", "Russia"), ("marketing manager", "Russia"), ("project manager", "Moscow"),
+# Поиски двух групп (решение владельца 12.11.2026): российская лента (region «ru») и раздел «За рубежом»
+# (region «abroad»). Окно — месяц: за неделю выдача слишком мала (первый запуск дал ~6 вакансий на фразу).
+RU_KEYWORDS = [
+    "python developer", "frontend developer", "backend developer", "product manager", "data analyst",
+    "marketing manager", "project manager", "qa engineer", "devops engineer", "ux ui designer",
+    "business analyst", "hr manager",
 ]
-PAGES_PER_QUERY = 2          # по 25 карточек
-PAUSE_SEC = 6.0              # между запросами
+RU_PLACES = ["Russia", "Moscow"]
+ABROAD_KEYWORDS = ["python developer", "frontend developer", "product manager", "data analyst", "qa engineer", "project manager"]
+ABROAD_PLACES = [
+    "Cyprus", "Tbilisi, Georgia", "Yerevan, Armenia", "Belgrade, Serbia",
+    "Almaty, Kazakhstan", "Istanbul, Turkey", "Dubai, United Arab Emirates", "Berlin, Germany",
+]
+RU_PAGES = 2                 # по 25 карточек на страницу
+ABROAD_PAGES = 1
+PAUSE_SEC = 8.0              # между запросами; реальная пауза 1,0-1,5 от этого значения
 MAX_REQUESTS = 12            # потолок за запуск
-MAX_AGE = "r604800"          # за неделю
+SLOTS = 8                    # запусков в сутки (каждые 3 часа): за сутки проходит весь список
+MAX_AGE = "r2592000"         # за месяц
+
+
+def pages() -> list:
+    """Весь список страниц поиска: (слова, место, region, start). Российские и зарубежные поиски чередуются
+    (на один российский — два зарубежных), чтобы каждый кусок списка, то есть каждый запуск, брал и то и другое."""
+    ru = [[(kw, loc, "ru", p * 25) for p in range(RU_PAGES)] for kw in RU_KEYWORDS for loc in RU_PLACES]
+    ab = [[(kw, loc, "abroad", p * 25) for p in range(ABROAD_PAGES)] for kw in ABROAD_KEYWORDS for loc in ABROAD_PLACES]
+    out = []
+    for i, group in enumerate(ru):
+        out += group
+        for g in ab[2 * i:2 * i + 2]:
+            out += g
+    for g in ab[2 * len(ru):]:      # если зарубежных больше, чем вмещает чередование
+        out += g
+    return out
+
+
+def current_slot(now: float = None) -> int:
+    """Номер куска списка для этого запуска. LINKEDIN_SLOT задаёт вручную; иначе по часу UTC (запуски в 0, 3, 6 ... ч)."""
+    env = os.environ.get("LINKEDIN_SLOT", "")
+    if env.strip().isdigit():
+        return int(env) % SLOTS
+    return int((now if now is not None else time.time()) // 3600 // (24 // SLOTS)) % SLOTS
+
+
+def todays_slice(slot: int) -> list:
+    allp = pages()
+    size = -(-len(allp) // SLOTS)
+    return allp[slot * size:(slot + 1) * size][:MAX_REQUESTS]
 
 
 class Blocked(Exception):
@@ -125,21 +166,21 @@ def send(feed: dict, requests: int) -> int:
 
 def run() -> int:
     seen, requests, blocked = {}, 0, None
+    dead = set()                 # поиски, у которых страница вышла короткой: дальше страниц нет
     try:
-        for kw, loc in QUERIES:
-            for p in range(PAGES_PER_QUERY):
-                if requests >= MAX_REQUESTS:
-                    raise StopIteration
-                if requests:
-                    time.sleep(PAUSE_SEC)
-                requests += 1
-                cards = parse_cards(fetch(kw, loc, p * 25))
-                for c in cards:
-                    seen.setdefault(c["id"], c)
-                if len(cards) < 10:
-                    break
-    except StopIteration:
-        pass
+        for kw, loc, region, start in todays_slice(current_slot()):
+            if (kw, loc) in dead:
+                continue
+            if requests >= MAX_REQUESTS:
+                break
+            if requests:
+                time.sleep(PAUSE_SEC * random.uniform(1.0, 1.5))
+            requests += 1
+            cards = parse_cards(fetch(kw, loc, start))
+            for c in cards:
+                seen.setdefault(c["id"], dict(c, region=region))
+            if len(cards) < 10:
+                dead.add((kw, loc))
     except Blocked as e:
         blocked = str(e)
     if blocked:
