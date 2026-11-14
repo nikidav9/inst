@@ -32,8 +32,17 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Прислать страницы карьерных сайтов на сервер
         shell: bash
         env:
           RELAY_KEY: ${{ secrets.RELAY_KEY }}
-        run: python3 career_relay.py | tee -a "$GITHUB_STEP_SUMMARY"
+        # Журнал публичный: из вывода скрипта остаются только счётчики (аудит 14.11.2026) —
+        # списки адресов и сбоев (строки с отступом) в журнал не идут.
+        run: |
+          python3 career_relay.py > "$RUNNER_TEMP/relay.log" 2>&1; RC=$?
+          grep -E '^(Получено карьерных эндпоинтов|Эндпоинтов: |RELAY_KEY|Список карьерных|Не удалось получить список)' "$RUNNER_TEMP/relay.log" \
+            | sed -E 's/(Не удалось получить список endpoints от сервера).*/\1/' | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Скрипт завершился с кодом $RC"
+          exit "$RC"

@@ -17,6 +17,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Проверить живой SEO-контур
         run: python3 scripts/seo-production-audit.py --base https://jobtoo.ru --samples 12 --json "$RUNNER_TEMP/seo-production-report.json"
       - name: Сохранить отчёт

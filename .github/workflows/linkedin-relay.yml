@@ -36,12 +36,21 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Собрать вакансии LinkedIn и прислать на сервер
         shell: bash
         env:
           LINKEDIN_RELAY_URL: https://jobtoo.ru/api/ingest.php?kind=linkedin_relay
           RELAY_KEY: ${{ secrets.RELAY_KEY }}
-        run: python3 linkedin-worker.py 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"; exit "${PIPESTATUS[0]}"
+        # Журнал публичный: из вывода сборщика остаются только строки со счётчиками (аудит 14.11.2026);
+        # тела ответов сервера и текст исключений в журнал не идут.
+        run: |
+          python3 linkedin-worker.py > "$RUNNER_TEMP/worker.log" 2>&1; RC=$?
+          grep -E '^(фид|остановлено|ничего не нашли|нет RELAY_KEY|сервер (отказал|недоступен))' "$RUNNER_TEMP/worker.log" \
+            | sed -E 's/(сервер отказал: HTTP [0-9]+).*/\1/; s/(сервер недоступен).*/\1/' | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Сборщик завершился с кодом $RC"
+          exit "$RC"
       - name: Запустить приём фида на сайте (вакансии в базу и ленту)
         if: ${{ !cancelled() }}
         shell: bash
@@ -52,13 +61,16 @@ jobs:
           # career_owner, telegram-ingest только за каналами), и в ленте было 0 вакансий LinkedIn.
           KEY=$(printf %s "$RELAY_KEY" | tr -d '\r\n')
           [ -n "$KEY" ] || { echo "RELAY_KEY не задан в секретах inst"; exit 1; }
+          echo "::add-mask::$KEY"
           URL="https://jobtoo.ru/api/ingest.php?source=linkedin&force=1"
           for attempt in 1 2 3 4 5 6; do
             RESP=$(curl -fsS "$URL" -H "X-Relay-Key: $KEY" --max-time 300) || RESP=''
-            echo "Вызов $attempt: ${RESP:0:400}" | tee -a "$GITHUB_STEP_SUMMARY"
+            CONT=''; echo "$RESP" | grep -q '"продолжение' && CONT=1
+            ERR=''; echo "$RESP" | grep -q '"status":"ошибка' && ERR=1
+            echo "Вызов $attempt: ответ ${#RESP} байт, продолжение=${CONT:-0}, ошибка=${ERR:-0}" | tee -a "$GITHUB_STEP_SUMMARY"
             if [ -z "$RESP" ]; then sleep 20; continue; fi
-            if echo "$RESP" | grep -q '"продолжение'; then sleep 10; continue; fi
-            if echo "$RESP" | grep -q '"status":"ошибка'; then echo "Приём вернул ошибку"; exit 1; fi
+            if [ -n "$CONT" ]; then sleep 10; continue; fi
+            if [ -n "$ERR" ]; then echo "Приём вернул ошибку"; exit 1; fi
             exit 0
           done
           echo "Приём не завершился за 6 вызовов"; exit 1

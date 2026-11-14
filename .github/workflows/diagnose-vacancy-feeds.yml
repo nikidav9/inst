@@ -7,6 +7,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: diagnose-vacancy-feeds
+  cancel-in-progress: false
 jobs:
   probe:
     runs-on: ubuntu-latest

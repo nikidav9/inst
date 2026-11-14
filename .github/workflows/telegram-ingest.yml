@@ -2,7 +2,7 @@
 # (08.11.2026, решение владельца: весь сбор вакансий идёт через inst). Разбор присланных
 # telegram-relay страниц: повторные GET ingest.php?kind=telegram, пока сервер отвечает
 # «продолжение». Ключ — секрет RELAY_KEY (на сервере tg_run_key_ok). Журнал публичный:
-# печатаем только число каналов и имена с ошибками.
+# печатаем только счётчики (имена каналов не печатаются, аудит 14.11.2026).
 name: Разбор Telegram-каналов
 
 on:
@@ -34,10 +34,11 @@ jobs:
           URL="https://jobtoo.ru/api/ingest.php?kind=telegram"
           for attempt in $(seq 1 400); do
             RESP=$(curl -fsS "$URL" -H "X-Relay-Key: $RELAY_KEY" --max-time 150) || RESP=''
-            echo "Вызов $attempt: ${RESP:0:120}"
+            CONT=''; echo "$RESP" | grep -q '"продолжение' && CONT=1
+            echo "Вызов $attempt: ответ ${#RESP} байт, продолжение=${CONT:-0}"
             if [ -z "$RESP" ]; then sleep 15; continue; fi
-            if echo "$RESP" | grep -q '"продолжение'; then sleep 2; continue; fi
-            echo "$RESP" | python3 -c 'import json,sys; r=json.load(sys.stdin)["run"]; bad=[x for x in r if not str(x.get("status","")).startswith("ок")]; print("Каналов в последнем вызове:", len(r), "не ок:", len(bad)); [print(" ", x["name"], "—", x["status"]) for x in bad[:30]]' | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ -n "$CONT" ]; then sleep 2; continue; fi
+            echo "$RESP" | python3 -c 'import json,sys; r=json.load(sys.stdin)["run"]; bad=[x for x in r if not str(x.get("status","")).startswith("ок")]; print("Каналов в последнем вызове:", len(r), "не ок:", len(bad))' | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           done
           echo "Сбор каналов не завершился за 400 вызовов"; exit 1

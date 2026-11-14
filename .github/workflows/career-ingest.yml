@@ -5,7 +5,8 @@
 # описаний describe.php, проверка ссылок link_check.php. Сервер разбирает присланные career-relay
 # страницы сам, здесь только повторные GET-вызовы. Ключ — секрет RELAY_KEY (тот же, что у
 # присылки; на сервере открывает только GET этих трёх скриптов, tg_run_key_ok).
-# Журнал публичный: печатаем только начало ответа, не весь JSON.
+# Журнал публичный (аудит 14.11.2026): печатаем только счётчики и слова-статусы, тела ответов сервера
+# (адреса, названия компаний, списки сбоев) в журнал не идут.
 # Предел задания GitHub — 6 часов: круг дочитывается с checkpoint следующим заходом.
 name: Сбор вакансий с карьерных сайтов
 
@@ -55,14 +56,16 @@ jobs:
           END=$(( $(date +%s) + 340*60 ))
           for attempt in $(seq 1 400); do
             RESP=$(curl -fsS "$URL" -H "X-Relay-Key: $RELAY_KEY" --max-time 600) || RESP=''
-            echo "Вызов $attempt: ${RESP:0:200}"
+            CONT=''; echo "$RESP" | grep -q '"продолжение' && CONT=1
+            ERR=''; echo "$RESP" | grep -q '"status":"ошибка' && ERR=1
+            echo "Вызов $attempt: ответ ${#RESP} байт, продолжение=${CONT:-0}, ошибка=${ERR:-0}"
             if [ -z "$RESP" ]; then sleep 15; continue; fi
-            if echo "$RESP" | grep -q '"продолжение'; then
+            if [ -n "$CONT" ]; then
               if [ "$(date +%s)" -gt "$END" ]; then echo "Предел 6 часов: круг дочитает следующий заход (checkpoint)"; exit 0; fi
               sleep 5; continue
             fi
             echo "Обход завершён"
-            if echo "$RESP" | grep -q '"status":"ошибка'; then
+            if [ -n "$ERR" ]; then
               echo "Круг оборван ошибкой — пропавшие вакансии на нём не гасились"; exit 1
             fi
             exit 0

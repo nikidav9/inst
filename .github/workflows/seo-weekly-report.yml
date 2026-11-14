@@ -1,4 +1,5 @@
-# Копия infra/inst/seo-weekly-report.yml из Jobbbrbeb. Секретов нет.
+# Черновик для nikidav9/inst: .github/workflows/seo-weekly-report.yml
+# Еженедельный отчёт по SEO-страницам jobtoo.ru: дубли title, canonical != self, description >160 / с «…».
 # Секретов нет. ТРЕБУЕТ скопировать в inst scripts/seo-weekly-report.py (только stdlib, публичные страницы).
 name: SEO weekly report
 on:
@@ -16,6 +17,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Собрать отчёт
         run: python3 scripts/seo-weekly-report.py --base https://jobtoo.ru --json "$RUNNER_TEMP/seo-weekly.json" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Сохранить отчёт
