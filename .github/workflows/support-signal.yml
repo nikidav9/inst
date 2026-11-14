@@ -1,0 +1,48 @@
+# Сигнал в Telegram «в поддержке JobToo ждут ответа» (13.11.2026, решение владельца).
+# Копия лежит в nikidav9/inst (.github/workflows/support-signal.yml): GitHub Actions выходит на
+# api.telegram.org с адреса вне России, а московский сервер до него достаёт не всегда.
+# Ничьих сообщений здесь нет: сервер отдаёт только число ждущих обращений и метку (kind=support_signal),
+# в Telegram уходит факт и ссылка на админку. Секреты inst: RELAY_KEY (уже есть), TG_BOT_TOKEN, SUPPORT_NOTIFY_TELEGRAM_ID.
+name: Сигнал о поддержке
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: support-signal
+  cancel-in-progress: false
+
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Проверить обращения и сообщить в Telegram
+        env:
+          RELAY_KEY: ${{ secrets.RELAY_KEY }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.SUPPORT_NOTIFY_TELEGRAM_ID }}
+        run: |
+          [ -n "$RELAY_KEY" ] || { echo "RELAY_KEY не задан в секретах inst"; exit 1; }
+          [ -n "$TG_BOT_TOKEN" ] && [ -n "$CHAT_ID" ] || { echo "Нужны секреты inst: TG_BOT_TOKEN и SUPPORT_NOTIFY_TELEGRAM_ID"; exit 1; }
+          URL="https://jobtoo.ru/api/ingest.php?kind=support_signal"
+          RESP=""
+          for i in 1 2 3; do
+            RESP=$(curl -fsS --max-time 30 "$URL" -H "X-Relay-Key: $RELAY_KEY") && break
+            RESP=""; sleep 10
+          done
+          [ -n "$RESP" ] || { echo "Сервер не ответил"; exit 1; }
+          echo "Ответ: $RESP"
+          NEW=$(echo "$RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("new") and "1" or "")')
+          [ -n "$NEW" ] || { echo "Нового нет"; exit 0; }
+          N=$(echo "$RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["waiting"])')
+          STAMP=$(echo "$RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["stamp"])')
+          TEXT="🆘 В поддержке JobToo ждут ответа: ${N}. Открыть: https://admin.jobtoo.ru/support"
+          OUT=$(curl -fsS --max-time 30 "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "text=${TEXT}" --data-urlencode "disable_web_page_preview=true") \
+            || { echo "Telegram не принял сообщение"; exit 1; }
+          echo "$OUT" | grep -q '"ok":true' || { echo "Telegram ответил отказом"; exit 1; }
+          curl -fsS --max-time 30 -X POST "$URL" -H "X-Relay-Key: $RELAY_KEY" -H "Content-Type: application/json" \
+            -d "{\"ack\":\"${STAMP}\"}" >/dev/null && echo "Отправлено и отмечено"
