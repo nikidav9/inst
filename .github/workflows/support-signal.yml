@@ -12,6 +12,9 @@ on:
   push:
     paths: ['support-signal-now', '.github/workflows/support-signal.yml']
 
+permissions:
+  contents: read
+
 concurrency:
   group: support-signal
   cancel-in-progress: false
@@ -36,7 +39,7 @@ jobs:
             RESP=""; sleep 10
           done
           [ -n "$RESP" ] || { echo "Сервер не ответил"; exit 1; }
-          echo "Ответ: $RESP"
+          # Ответ сервера в публичный лог не печатаем (репозиторий inst публичный, аудит 14.11.2026).
           NEW=$(echo "$RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("new") and "1" or "")')
           [ -n "$NEW" ] || { echo "Нового нет"; exit 0; }
           N=$(echo "$RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["waiting"])')
