@@ -9,6 +9,8 @@ on:
   schedule:
     - cron: '*/10 * * * *'
   workflow_dispatch:
+  push:
+    paths: ['support-signal-now', '.github/workflows/support-signal.yml']
 
 concurrency:
   group: support-signal
