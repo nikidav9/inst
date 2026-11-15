@@ -1,0 +1,60 @@
+# Копия для открытого репозитория nikidav9/inst: .github/workflows/telegram-poll.yml,
+# рядом в корне inst — копия infra/telegram-listener.py (06.11.2026).
+#
+# Заменяет круглосуточную машину вне РФ: раз в 10 минут один проход — читаем новые посты
+# публичных каналов и присылаем на jobtoo.ru (ingest.php?kind=telegram_push). Минуты в открытом
+# репозитории бесплатны; с машин GitHub Telegram открыт (так же работает telegram-relay.yml).
+# Свежесть — период cron (на деле 10–20 минут: GitHub откладывает запуски по расписанию).
+#
+# Секреты inst: RELAY_KEY (уже есть), TG_API_ID, TG_API_HASH, TG_SESSION (строка из
+# `telegram-listener.py login`). Логи открыты всем — в журнал идут только числа (имена каналов фильтруются здесь, аудит 14.11.2026).
+# Форки и чужие PR секретов не получают. Запуск только по расписанию и вручную.
+name: Telegram-каналы — новые посты
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      # Секреты Telegram владелец добавляет позже (15.11.2026): пока их нет, проход молча пропускается, а не падает каждые 10 минут.
+      - name: Есть ли секреты Telegram
+        id: sec
+        shell: bash
+        env:
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+        run: |
+          if [ -n "$TG_SESSION" ] && [ -n "$TG_API_ID" ]; then echo "ready=1" >> "$GITHUB_OUTPUT"; else echo "Секретов Telegram ещё нет — проход пропущен."; fi
+      - uses: actions/checkout@v4
+        if: steps.sec.outputs.ready == '1'
+        with:
+          persist-credentials: false
+      - if: steps.sec.outputs.ready == '1'
+        run: pip install telethon==1.45.0
+      - name: Прислать новые посты
+        if: steps.sec.outputs.ready == '1'
+        shell: bash
+        env:
+          JT_RELAY_KEY: ${{ secrets.RELAY_KEY }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+        # Журнал публичный: имена каналов и ответы сервера не печатаем (аудит 14.11.2026) —
+        # из вывода скрипта остаётся только итоговая строка со счётчиками.
+        run: |
+          python3 telegram-listener.py poll > "$RUNNER_TEMP/poll.log" 2>&1; RC=$?
+          grep -E '^(каналов: |слушаю каналов: )' "$RUNNER_TEMP/poll.log" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Скрипт завершился с кодом $RC"
+          exit "$RC"
