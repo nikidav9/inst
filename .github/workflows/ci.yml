@@ -9,6 +9,8 @@ name: CI
 # На PR тяжёлое гоняется по участкам (задание changes); ночью — всё целиком,
 # чтобы правка одного участка, сломавшая другой, всплыла до утра.
 on:
+  push:
+    paths: [ci-now]   # запуск строкой в ci-now; сообщение коммита «ci: ветка [база]»
   workflow_dispatch:
     inputs:
       ref:
@@ -24,7 +26,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ inputs.ref || 'main' }}
+  group: ci-${{ github.workflow }}-${{ inputs.ref || github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -63,9 +65,13 @@ jobs:
       - name: Код закрытого репозитория (токен только на чтение)
         env:
           SRC_TOKEN: ${{ secrets.SRC_READ_TOKEN }}
-          SRC_REF: ${{ inputs.ref || 'main' }}
-          SRC_BASE: ${{ inputs.base }}
+          IN_REF: ${{ inputs.ref }}
+          IN_BASE: ${{ inputs.base }}
+          MSG: ${{ github.event.head_commit.message }}
         run: |
+          # Запуск пушем строки в ci-now: сообщение коммита «ci: <ветка> [<с чем сравнить>]».
+          SRC_REF="${IN_REF:-$(printf '%s' "$MSG" | sed -n '1s/^ci: *\([^ ]*\).*/\1/p')}"; SRC_REF="${SRC_REF:-main}"
+          SRC_BASE="${IN_BASE:-$(printf '%s' "$MSG" | sed -n '1s/^ci: *[^ ]* *\([^ ]*\).*/\1/p')}"
           git init -q .
           hdr="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$SRC_TOKEN" | base64 -w0)"
           git -c http.extraheader="$hdr" fetch -q --depth=300 https://github.com/nikidav9/Jobbbrbeb.git "$SRC_REF" ${SRC_BASE:+"$SRC_BASE"}
@@ -73,8 +79,10 @@ jobs:
           git log -1 --format='commit %h'
       - id: diff
         env:
-          BASE: ${{ inputs.base }}
+          IN_BASE: ${{ inputs.base }}
+          MSG: ${{ github.event.head_commit.message }}
         run: |
+          BASE="${IN_BASE:-$(printf '%s' "$MSG" | sed -n '1s/^ci: *[^ ]* *\([^ ]*\).*/\1/p')}"
           if [ -z "$BASE" ]; then
             for k in jupiter dashboard jupiter_tests build; do echo "$k=true" >> "$GITHUB_OUTPUT"; done; exit 0
           fi
@@ -115,9 +123,13 @@ jobs:
       - name: Код закрытого репозитория (токен только на чтение)
         env:
           SRC_TOKEN: ${{ secrets.SRC_READ_TOKEN }}
-          SRC_REF: ${{ inputs.ref || 'main' }}
-          SRC_BASE: ${{ inputs.base }}
+          IN_REF: ${{ inputs.ref }}
+          IN_BASE: ${{ inputs.base }}
+          MSG: ${{ github.event.head_commit.message }}
         run: |
+          # Запуск пушем строки в ci-now: сообщение коммита «ci: <ветка> [<с чем сравнить>]».
+          SRC_REF="${IN_REF:-$(printf '%s' "$MSG" | sed -n '1s/^ci: *\([^ ]*\).*/\1/p')}"; SRC_REF="${SRC_REF:-main}"
+          SRC_BASE="${IN_BASE:-$(printf '%s' "$MSG" | sed -n '1s/^ci: *[^ ]* *\([^ ]*\).*/\1/p')}"
           git init -q .
           hdr="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$SRC_TOKEN" | base64 -w0)"
           git -c http.extraheader="$hdr" fetch -q --depth=300 https://github.com/nikidav9/Jobbbrbeb.git "$SRC_REF" ${SRC_BASE:+"$SRC_BASE"}
@@ -953,9 +965,13 @@ jobs:
       - name: Код закрытого репозитория (токен только на чтение)
         env:
           SRC_TOKEN: ${{ secrets.SRC_READ_TOKEN }}
-          SRC_REF: ${{ inputs.ref || 'main' }}
-          SRC_BASE: ${{ inputs.base }}
+          IN_REF: ${{ inputs.ref }}
+          IN_BASE: ${{ inputs.base }}
+          MSG: ${{ github.event.head_commit.message }}
         run: |
+          # Запуск пушем строки в ci-now: сообщение коммита «ci: <ветка> [<с чем сравнить>]».
+          SRC_REF="${IN_REF:-$(printf '%s' "$MSG" | sed -n '1s/^ci: *\([^ ]*\).*/\1/p')}"; SRC_REF="${SRC_REF:-main}"
+          SRC_BASE="${IN_BASE:-$(printf '%s' "$MSG" | sed -n '1s/^ci: *[^ ]* *\([^ ]*\).*/\1/p')}"
           git init -q .
           hdr="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$SRC_TOKEN" | base64 -w0)"
           git -c http.extraheader="$hdr" fetch -q --depth=300 https://github.com/nikidav9/Jobbbrbeb.git "$SRC_REF" ${SRC_BASE:+"$SRC_BASE"}
@@ -994,9 +1010,13 @@ jobs:
       - name: Код закрытого репозитория (токен только на чтение)
         env:
           SRC_TOKEN: ${{ secrets.SRC_READ_TOKEN }}
-          SRC_REF: ${{ inputs.ref || 'main' }}
-          SRC_BASE: ${{ inputs.base }}
+          IN_REF: ${{ inputs.ref }}
+          IN_BASE: ${{ inputs.base }}
+          MSG: ${{ github.event.head_commit.message }}
         run: |
+          # Запуск пушем строки в ci-now: сообщение коммита «ci: <ветка> [<с чем сравнить>]».
+          SRC_REF="${IN_REF:-$(printf '%s' "$MSG" | sed -n '1s/^ci: *\([^ ]*\).*/\1/p')}"; SRC_REF="${SRC_REF:-main}"
+          SRC_BASE="${IN_BASE:-$(printf '%s' "$MSG" | sed -n '1s/^ci: *[^ ]* *\([^ ]*\).*/\1/p')}"
           git init -q .
           hdr="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$SRC_TOKEN" | base64 -w0)"
           git -c http.extraheader="$hdr" fetch -q --depth=300 https://github.com/nikidav9/Jobbbrbeb.git "$SRC_REF" ${SRC_BASE:+"$SRC_BASE"}
