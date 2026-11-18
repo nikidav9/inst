@@ -708,6 +708,9 @@ jobs:
       - name: Карьерный JSON разбирается по карте полей
         run: php tests/career_json_test.php
 
+      - name: Площадки удалёнки (Himalayas, Remote OK, Jobicy, Arbeitnow) разбираются и попадают в «За рубежом»
+        run: php tests/career_platform_test.php
+
       - name: Карьерный коннектор ходит тем же методом, что записан
         run: php tests/career_http_method_test.php
 
