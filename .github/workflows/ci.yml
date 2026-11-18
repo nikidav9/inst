@@ -1,0 +1,1023 @@
+# Файл собран scripts/make-inst-ci.py из .github/workflows/ci.yml — не править руками.
+# Лежит в публичном nikidav9/inst (минуты закрытого Jobbbrbeb кончились, 18.11.2026).
+# Нужен секрет SRC_READ_TOKEN — fine-grained токен только Contents: read на Jobbbrbeb.
+name: CI
+
+# Только на PR (решение владельца 06.10.2026): после мержа тот же код
+# проверялся второй раз и держал оба исполнителя VPS ~30 минут — выкат
+# сайта стоял за ним в очереди. Мерж — только при зелёном CI на PR.
+# На PR тяжёлое гоняется по участкам (задание changes); ночью — всё целиком,
+# чтобы правка одного участка, сломавшая другой, всплыла до утра.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: ветка или коммит закрытого репозитория (по умолчанию main)
+        default: main
+      base:
+        description: коммит, с которым сравнить (пусто — гнать всё целиком)
+        default: ''
+  schedule:
+    - cron: '17 23 * * *'   # 02:17 МСК, полный прогон main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ inputs.ref || 'main' }}
+  cancel-in-progress: true
+
+jobs:
+  # Какие тяжёлые части нужны этому PR (решения владельца 06.10.2026):
+  # движок Юпитера (~10 мин), тесты Юпитера (~6 мин), сборка сайта и
+  # приложения (~3 мин) и сборка панели гоняются, только если менялся их
+  # участок или сам CI. Быстрое (lint, typecheck, PHP-тесты) — всегда.
+  # Ручной и ночной запуск — всё.
+  changes:
+    name: What changed
+    runs-on: ubuntu-latest # 12.11.2026: проверки вынесены с боевого сервера (решение владельца), вернуть — [self-hosted, selectel-ci]
+    # 11.11.2026: было 3 минуты. checkout с fetch-depth 0 тянет историю всех веток (их 300+),
+    # и на загруженной машине сборки не укладывался в лимит: проверка отменялась, а за ней
+    # пропускались все остальные.
+    timeout-minutes: 10
+    outputs:
+      jupiter: ${{ steps.diff.outputs.jupiter }}
+      dashboard: ${{ steps.diff.outputs.dashboard }}
+      jupiter_tests: ${{ steps.diff.outputs.jupiter_tests }}
+      build: ${{ steps.diff.outputs.build }}
+    steps:
+      # Рабочая папка на сервере сборки общая для всех заданий. 20.10.2026 задание
+      # рассылки оставило в ней sparse-checkout, и следующие checkout получали не
+      # весь код («package-lock.json не найден»). Чиним до checkout.
+      - name: Рабочая папка целиком
+        run: |
+          # Сам checkout sparse-checkout выключает, но пометки skip-worktree в
+          # индексе остаются, и файлы не возвращаются. Нашли такие — папку
+          # очищаем целиком, checkout скачает чистую копию.
+          cd "$GITHUB_WORKSPACE" 2>/dev/null || exit 0
+          if [ "$(git config --get core.sparseCheckout 2>/dev/null)" = true ] || git ls-files -v 2>/dev/null | grep -q '^S' \
+             || [ -n "$(git ls-files --deleted 2>/dev/null | head -1)" ]; then
+            echo "Рабочая папка неполная — очищаю"
+            find "$GITHUB_WORKSPACE" -mindepth 1 -delete
+          fi
+      - name: Код закрытого репозитория (токен только на чтение)
+        env:
+          SRC_TOKEN: ${{ secrets.SRC_READ_TOKEN }}
+          SRC_REF: ${{ inputs.ref || 'main' }}
+          SRC_BASE: ${{ inputs.base }}
+        run: |
+          git init -q .
+          hdr="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$SRC_TOKEN" | base64 -w0)"
+          git -c http.extraheader="$hdr" fetch -q --depth=300 https://github.com/nikidav9/Jobbbrbeb.git "$SRC_REF" ${SRC_BASE:+"$SRC_BASE"}
+          git checkout -q --detach FETCH_HEAD
+          git log -1 --format='commit %h'
+      - id: diff
+        env:
+          BASE: ${{ inputs.base }}
+        run: |
+          if [ -z "$BASE" ]; then
+            for k in jupiter dashboard jupiter_tests build; do echo "$k=true" >> "$GITHUB_OUTPUT"; done; exit 0
+          fi
+          # quotepath=off: иначе русское имя файла (docs/очередь-задач.md) приходит
+          # в кавычках восьмеричными кодами, не совпадает ни с одним участком и
+          # запускает сборку зря (06.10.2026).
+          files=$(git -c core.quotepath=off diff --name-only "$BASE" HEAD)
+          printf '%s\n' "$files"
+          has() { printf '%s\n' "$files" | grep -qE "$1" && echo true || echo false; }
+          echo "jupiter=$(has '^(jupiter/|\.github/workflows/ci\.yml$)')" >> "$GITHUB_OUTPUT"
+          echo "dashboard=$(has '^(dashboard/|\.github/workflows/ci\.yml$)')" >> "$GITHUB_OUTPUT"
+          echo "jupiter_tests=$(has '^(jupiter/|infra/|tests/(jupiter|recon)_[^/]*\.py$|\.github/workflows/ci\.yml$)')" >> "$GITHUB_OUTPUT"
+          # Сборка — если хоть один файл не из списка «в сборку не входит»:
+          # незнакомый путь собирает, а не пропускает.
+          nobuild='^(php-proxy/|supabase/|jupiter/|dashboard/|docs/|\.claude/|video/|tests/api_smoke/|tests/phpstan/|phpstan[^/]*\.neon$|tests/[^/]*\.(php|py|sh)$|[^/]*\.md$)'
+          echo "build=$(printf '%s\n' "$files" | grep -vqE "$nobuild" && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  app:
+    name: App, tests and web build
+    needs: changes
+    runs-on: ubuntu-latest # 12.11.2026: проверки вынесены с боевого сервера (решение владельца), вернуть — [self-hosted, selectel-ci]
+    timeout-minutes: 20
+    steps:
+      # Рабочая папка на сервере сборки общая для всех заданий. 20.10.2026 задание
+      # рассылки оставило в ней sparse-checkout, и следующие checkout получали не
+      # весь код («package-lock.json не найден»). Чиним до checkout.
+      - name: Рабочая папка целиком
+        run: |
+          # Сам checkout sparse-checkout выключает, но пометки skip-worktree в
+          # индексе остаются, и файлы не возвращаются. Нашли такие — папку
+          # очищаем целиком, checkout скачает чистую копию.
+          cd "$GITHUB_WORKSPACE" 2>/dev/null || exit 0
+          if [ "$(git config --get core.sparseCheckout 2>/dev/null)" = true ] || git ls-files -v 2>/dev/null | grep -q '^S' \
+             || [ -n "$(git ls-files --deleted 2>/dev/null | head -1)" ]; then
+            echo "Рабочая папка неполная — очищаю"
+            find "$GITHUB_WORKSPACE" -mindepth 1 -delete
+          fi
+      - name: Код закрытого репозитория (токен только на чтение)
+        env:
+          SRC_TOKEN: ${{ secrets.SRC_READ_TOKEN }}
+          SRC_REF: ${{ inputs.ref || 'main' }}
+          SRC_BASE: ${{ inputs.base }}
+        run: |
+          git init -q .
+          hdr="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$SRC_TOKEN" | base64 -w0)"
+          git -c http.extraheader="$hdr" fetch -q --depth=300 https://github.com/nikidav9/Jobbbrbeb.git "$SRC_REF" ${SRC_BASE:+"$SRC_BASE"}
+          git checkout -q --detach FETCH_HEAD
+          git log -1 --format='commit %h'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: PHP syntax
+        run: find php-proxy -name '*.php' -print0 | xargs -0 -n1 php -l
+
+      # Класс ошибок «вызов ↔ сигнатура» (PR #876: frc_key(array $sections) получал null из db.php → HTTP 500 на всей
+      # ленте), который тесты модулей по отдельности не видят. Три слоя: быстрый сторож по тексту (секунды), PHPStan
+      # (≈1 мин, падает только на новые замечания сверх phpstan-baseline.neon) и дымовые проверки настоящего db.php.
+      - name: Вызов ↔ сигнатура PHP — число аргументов, неопределённые функции, null в параметр без «?»
+        run: |
+          php tests/php_call_signature_test.php --self-test
+          php tests/php_call_signature_test.php
+
+      - name: Кэш PHPStan
+        uses: actions/cache@v4
+        with:
+          path: .phpstan-cache
+          key: phpstan-2.1.17-${{ github.sha }}
+          restore-keys: phpstan-2.1.17-
+
+      # Версия закреплена и сверена по sha256 (phar с github.com/phpstan/phpstan/releases; в package.json не входит).
+      # Локально то же: tests/phpstan.sh. Базовый файл пересоздаётся: tests/phpstan.sh --baseline.
+      - name: PHPStan — аргументы функций и типы (php-proxy, уровень 5 + checkNullables, только новые замечания)
+        run: |
+          curl -fsSL --retry 3 -o /tmp/phpstan.phar https://github.com/phpstan/phpstan/releases/download/2.1.17/phpstan.phar
+          echo "767edc1d6a596308c9bdd1fa7e42bf27c88ce3772b8e527cba87dc1c19bd1c3b  /tmp/phpstan.phar" | sha256sum -c -
+          php -d memory_limit=2G /tmp/phpstan.phar analyse -c phpstan.neon --no-progress --memory-limit=2G
+
+      - name: Настройки PHPStan не потеряли главное (версия, контрольная сумма, checkNullables)
+        run: python3 tests/phpstan_config_test.py
+
+      # Настоящий php-proxy/db.php под `php -S` + заглушка PostgREST/хранилища/SMTP (tests/api_smoke/, только stdlib).
+      # ≈1 мин. Локально: python3 tests/api_smoke_test.py [feed|profile|cancel|auth|perms].
+      - name: Дымовые проверки API — настоящий db.php, заглушка базы, почты и хранилища
+        run: python3 tests/api_smoke_test.py
+
+
+      - name: Страница вакансии отдаёт содержимое и разметку
+        run: php tests/vacancy_page_test.php
+
+      - name: Адреса вакансий — транслит, slug и короткий id
+        run: php tests/vacancy_slug_test.php
+
+      - name: Сводные страницы считают, а не выдумывают
+        run: php tests/landing_page_test.php
+
+      - name: Страницы компаний, метро и стран — с порогом и в карте сайта
+        run: php tests/seo_pages_test.php
+
+      - name: Блок прямого ответа «Коротко» (AEO) — длина, числа из данных, speakable, малые выборки
+        run: php tests/seo_answer_test.php
+
+      - name: Главная и /companies для робота без JS — H1, текст, 20 вакансий, приложение не тронуто
+        run: php tests/home_ssr_test.php
+      - name: Страница компании /companies/слаг — слаг, факты, разметка
+        run: php tests/company_pages_test.php
+
+      - name: Зарплаты /zarplaty — порог 10, квартили, тексты, разметка, карта сайта
+        run: php tests/zarplaty_test.php
+
+      - name: Карта сайта не собирается заново на каждый запрос
+        run: php tests/sitemap_cache_test.php
+      - name: Индекс и части карты сайта
+        run: php tests/sitemap_index_test.php
+
+      - name: Приглашение платит за выход на смену, а не за отклик
+        run: php tests/referral_test.php
+
+
+
+      - name: Скрытые возраст и номер не уходят работодателю, файл сертификата — только владельцу
+        run: php tests/profile_privacy_test.php
+
+      - name: Удаление аккаунта кодом — только своя почта и свой аккаунт
+        run: php tests/delete_by_code_test.php
+
+
+      - name: Вход по почте — коды, квитанции, письмо доходит до SMTP
+        run: php tests/auth_email_test.php
+
+      - name: Окно «Войти или зарегистрироваться» — одинаковые ответы для известной и неизвестной почты
+        run: php tests/auth_entry_test.php
+
+      - name: Вход через Яндекс ID — три исхода, билет, секрет только на сервере
+        run: php tests/auth_yandex_test.php
+
+      - name: Отклик на сайте компании — в «Откликах», не в «Избранном»
+        run: php tests/site_apply_test.php
+
+      - name: Telegram-каналы — разбор t.me/s, контакт, фильтр, выключение плохого канала
+        run: php tests/telegram_source_test.php
+
+      - name: Telegram-каналы — зарубежный пост из ru-канала, название компании
+        run: |
+          php tests/telegram_abroad_test.php
+          php tests/telegram_company_test.php
+          php tests/telegram_push_test.php
+
+      - name: Отклик по контакту и страница резюме /r/ — текст, адреса, срок, поля
+        run: |
+          php tests/contact_apply_test.php
+          php tests/telegram_written_test.php
+          php tests/ju_week_stats_test.php
+
+      - name: Выход гасит сессию, «выйти везде» гасит все
+        run: php tests/session_revoke_test.php
+
+      - name: Согласие на обработку данных пишется и его пропажу видно
+        run: php tests/consent_test.php
+
+      - name: Согласие на рекламную рассылку — отдельное, отзываемое, только о себе
+        run: php tests/marketing_consent_test.php
+
+      - name: Письмо «3 дня Pro бесплатно» — только согласившимся, один раз, отписка отзывает согласие
+        run: php tests/promo_mail_test.php
+
+      - name: Почтовая рассылка из дашборда — только согласившимся, повтор не шлёт дважды, отписка
+        run: php tests/marketing_mail_test.php
+
+      - name: nginx — регулярки с {n} в кавычках (иначе nginx -t падает и сайт недоступен)
+        run: python3 tests/nginx_regex_quotes_test.py
+
+      - name: Подборка вакансий раз в неделю — только с согласием, 4 без возврата — стоп, отписка
+        run: php tests/weekly_mail_test.php
+
+      - name: Версия приложения в запросе — устаревшей сборке отказ, остальным нет
+        run: php tests/app_version_test.php
+
+      - name: Работодателей не регистрируем — письмо в поддержку, живое число компаний на сайте
+        run: php tests/employer_closed_test.php
+
+
+
+
+      - name: Заявки Jupiter — свои свои, воркер не подменяет чужое
+        run: php tests/jupiter_applications_test.php
+
+      - name: Отмена неотправленного отклика и удаление записи — отправленное не отзывается, воркер не пишет поверх
+        run: php tests/jupiter_cancel_test.php
+
+      - name: Поручение на автоотклик Юпитера включается документами, отзыв настоящий
+        run: php tests/jupiter_live_consent_test.php
+
+      - name: Экран «Ждут вас» получает своё выбранное резюме
+        run: php tests/jupiter_fill_resume_test.php
+
+      - name: Почта JobToo — читаемый адрес, повтор получает цифру
+        run: php tests/jupiter_mail_address_test.php
+
+      - name: Капча человеку — права, срок, длина ответа, чужая заявка
+        run: php tests/jupiter_captcha_test.php
+
+      - name: Вопросы от работодателей — права, банк ответов, возврат отклика в очередь
+        run: php tests/jupiter_questions_test.php
+
+      - name: Отклик письмом — домен вакансии, разрешение, вложение, Reply-To
+        run: php tests/jupiter_email_apply_test.php
+
+      - name: Логотипы компаний — WebP/PNG 256×256, права, имя файла по содержимому
+        run: php tests/company_logos_db_test.php
+
+      - name: Публичные страницы компаний и зарплат — функции открыты, зарубежные не входят, пустая ячейка не выдумывается
+        run: php tests/public_pages_test.php
+
+      - name: Молнии на сервере — 20 откликов за московские сутки на всех устройствах
+        run: php tests/energy_server_test.php
+
+      - name: YandexGPT подсказывает автопилоту поля — без данных человека, только ключи из списка
+        run: php tests/jupiter_field_hints_test.php
+
+      - name: Ключ YandexGPT из дашборда — сильнее GitHub, наружу только маска, непринятый Яндексом не сохраняется
+        run: php tests/ygpt_dashboard_test.php
+
+      - name: Выбор нейросети — Яндекс или Claude одной функцией, ключи только маской, без ключа Claude работает Яндекс
+        run: php tests/ai_provider_test.php
+
+      - name: Pro —Юпитер улучшает резюме и пишет письмо без выдуманных цифр, только своё и только с Pro
+        run: php tests/pro_ai_test.php
+
+      - name: Рамки Джу — только про работу, нейросеть и инструкции не раскрываются
+        run: php tests/ju_guard_test.php
+
+      - name: Джу не обещает ATS, не спамит ключевиками, не выдумывает навыки и цифры
+        run: php tests/pro_safety_test.php
+
+      - name: Английское резюме для англоязычных вакансий — имя кодом, без особых категорий в нейросети, перевод без лишнего и выдуманных цифр
+        run: php tests/resume_en_test.php
+
+      - name: Память Джу — факты только с источником, особые категории не пишутся, только свои
+        run: php tests/career_memory_test.php
+
+      - name: Профиль вакансии — разбор без ИИ, хэш стабилен, пишутся только изменившиеся
+        run: php tests/vacancy_profile_test.php
+
+      - name: «Что дальше?» — исход ставит только владелец и только у отправленного отклика
+        run: php tests/jupiter_outcome_test.php
+      - name: Источник исхода — исхода без источника не бывает, выведенных исходов нет
+        run: php tests/outcome_provenance_test.php
+      - name: «Есть новости?» — окно 7/14/60 дней, «пока неизвестно» не исход
+        run: php tests/outcome_checkin_test.php
+
+      - name: Сообщение рекрутера — связь только однозначная, текст не хранится, без отправки
+        run: php tests/recruiter_message_test.php
+
+      - name: Интервью — только при подтверждённом interview, отзыв не исход
+        run: php tests/interview_mode_test.php
+
+      - name: Тренировка интервью — без оценок, ответ не хранится
+        run: php tests/mock_interview_test.php
+
+      - name: Офферы — только при подтверждённом «Оффер», сравнение без баллов
+        run: php tests/offers_test.php
+
+      - name: Переговоры — без выдуманного «другого оффера», только «Скопировать»
+        run: php tests/negotiate_test.php
+
+      - name: Личная аналитика — только с источником, малые выборки без выводов
+        run: php tests/ju_analytics_test.php
+
+      - name: Эксперименты — одна переменная, согласие, итог с n
+        run: php tests/ju_experiments_test.php
+
+      - name: Оптимизатор — только предложение через «Подтвердить»
+        run: php tests/ju_optimizer_test.php
+
+      - name: Межпользовательская аналитика — выключена, k-анонимность, ничего не читает
+        run: php tests/ju_cohort_test.php
+
+      - name: Real match — профиль и личный сигнал отдельно, без чисел
+        run: php tests/real_match_test.php
+
+      - name: Карьерный путь — уровень из цели, пробелы с источником
+        run: php tests/career_path_test.php
+
+      - name: Рыночная стоимость — вилки только с n, без диапазона на малой выборке
+        run: php tests/market_value_test.php
+
+      - name: Copilot — только pending через «Подтвердить», ИИ привязан к тексту
+        run: php tests/ju_copilot_test.php
+
+      - name: Понимание ответов знакомства — правила раньше ИИ, без особых категорий, предел 20, только Pro
+        run: php tests/ju_understand_test.php
+
+      - name: Где могу работать — допуск по блоку профиля; без блока лента не меняется
+        run: php tests/work_eligibility_test.php
+
+      - name: Шум в ленте — мусорные заголовки скрыты, подозрительные ниже с пометкой
+        run: php tests/vacancy_noise_test.php
+
+      - name: Отчёт ATS — совпало/пробелы/риски без процентов, вопросы не больше трёх, особые категории не сохраняются
+        run: php tests/ats_report_test.php
+
+      - name: Ключ вопроса одинаков в PHP и Python
+        run: python3 tests/question_key_parity_test.py
+
+      - name: Генераторы Джу сверяют цифры и навыки только с памятью фактов
+        run: php tests/pro_memory_test.php
+
+      - name: Замок перед отправкой — вопросы без ответа, автоотказ, выдумки Джу, особые категории, капча
+        run: php tests/safety_gate_test.php
+
+      - name: Исход по письму — правила без ИИ, только предложение, отказ важнее
+        run: php tests/mail_outcome_test.php
+
+      - name: Учёт расходов YandexGPT — токены, рубли по тарифу, только числа, сбой не роняет вызов
+        run: php tests/ai_usage_test.php
+
+      - name: Движок решения Джу — автоотказ закрывает отправку, без Pro нет адаптации и письма, пробел памяти — вопрос
+        run: php tests/resume_engine_test.php
+
+      - name: Стратегии профессий — курьер, продакт, разработчик определяются без ИИ
+        run: php tests/profession_strategy_test.php
+
+      - name: Письмо под компанию — о компании только факты из нашей базы
+        run: php tests/cover_company_test.php
+
+      - name: Autopilot — подбирает только доступное и не больше 10, без уровня autopilot ни одного запроса
+        run: php tests/ju_autopilot_test.php
+
+      - name: Ответ рекрутеру — только своё письмо, реальный адресат, один раз, через замок
+        run: php tests/mail_reply_test.php
+
+      - name: Подготовка к интервью — заготовки только по памяти, без Pro только темы
+        run: php tests/interview_prep_test.php
+
+      - name: Предпочтения Джу — от 5 сигналов, сброс работает, оффер весит больше интервью, анкета не повторяется
+        run: php tests/ju_prefs_test.php
+
+      - name: Воронка и стратегия Джу — без процентов и обещаний, не больше трёх подсказок
+        run: php tests/ju_funnel_test.php
+
+      - name: «Сегодня» Джу — пуш только если есть что показать, один в день, пассивный не чаще недели
+        run: php tests/ju_today_test.php
+
+      - name: Очередь откликов Джу — группы, план дня, «Пропустить» — слабый сигнал
+        run: php tests/apply_queue_test.php
+
+      - name: Проверка перед откликом — READY / NEEDS_USER_INPUT / BLOCKED
+        run: php tests/apply_qc_test.php
+
+      - name: Телефон — страны СНГ, проверка и показ
+        run: php tests/phone_format_test.php
+
+      - name: Квитанция передачи отклика — только при submitted / submission_unknown
+        run: php tests/handoff_receipt_test.php
+
+      - name: Как резюме прочтёт робот — свой PDF читается целиком, битый и бомба не роняют
+        run: php tests/resume_readback_test.php
+
+      - name: Стратегия поиска — существенная правка и команда только через подтверждение, резюме не трогается
+        run: php tests/search_strategy_test.php
+
+      - name: Opportunity Score — детерминированно, без вероятностей, неизвестное не равно провалу
+        run: php tests/opportunity_test.php
+
+      - name: Здоровье стратегии — без зарплаты не провал, ослабляется ровно один параметр
+        run: php tests/strategy_health_test.php
+
+      - name: География найма — Remote ≠ Worldwide, unknown ≠ ineligible, шаблон = миграции 190
+        run: php tests/hiring_geo_test.php
+
+      - name: Профиль компании — факты, выводы с основанием и неизвестное раздельно, без личных полей
+        run: php tests/company_profile_test.php
+
+      - name: Личность вакансии — двойники склеиваются, «ghost» не утверждается, только наблюдения
+        run: php tests/vacancy_identity_test.php
+
+      - name: Рынок под цель — малая выборка без долей, навык с единичными упоминаниями не советуется
+        run: php tests/market_intel_test.php
+
+      - name: Разбор вакансии — пункт только с настоящей цитатой, контакты в модель не уходят, пределы
+        run: php tests/vacancy_insight_test.php
+
+      - name: Сверка разбора вакансии — выборка по 2 на компанию, raw/kept, отчёт с экранированием, без токена отказ
+        run: php tests/insight_eval_test.php
+
+      - name: Бета-доступ — список по хэшу почты, BETA_EMAILS
+        run: php tests/beta_test.php
+
+      - name: Подхожу ли я (Pro) — цитаты из резюме и вакансии настоящие, цифры только из резюме, только с Pro и только своё
+        run: php tests/pro_fit_test.php
+
+      - name: О компании на экране вакансии — только факты из своей базы, нет данных — блок скрыт
+        run: php tests/company_context_test.php
+
+      - name: Создать резюме — PDF читается, xref верен, только своё
+        run: php tests/resume_pdf_test.php
+
+      - name: Чтение PDF на сервере — ASCII85, мусор не отдаётся Джу
+        run: php tests/pdf_text_server_test.php
+
+      - name: Экзамен Юпитера по резюме — интервью доходит до сборки, оценщик, цифры из ответов
+        run: php tests/pro_eval_test.php
+
+      - name: Разбор загруженного резюме Алисой — что уходит в модель, слияние, оригинал
+        run: php tests/resume_ai_test.php
+
+      - name: Блог — статьи, лента RSS для Дзена (черновики), маршруты, без рекламы
+        run: php tests/blog_test.php
+
+      - name: GEO для нейросетей — /ai, llms.txt, разметка, маршруты
+        run: php tests/ai_page_test.php
+
+      - name: Сила резюме — ссылка для друзей, проверка присланного, страница, права
+        run: php tests/score_share_test.php
+
+      - name: Оплата Pro — срок, возврат, чек «Мой налог», один раз и только свой платёж
+        run: php tests/payments_test.php
+
+      - name: Поиск компаний на системах найма — разбор выдачи, поддомены, отсев подключённых
+        run: php tests/ats_discover_test.php
+
+      - name: Clymly — подпись, одноразовые коды, состав передачи, uid только из сессии
+        run: php tests/clymly_partner_test.php
+
+      - name: Clymly — журнал повторов недоступен, pull всё равно отдаёт данные
+        run: php tests/clymly_journal_down_test.php
+
+      - name: Jupiter живой экран — сроки, слоты, ввод, кадры, права
+        run: php tests/jupiter_screen_test.php
+
+      - name: Вход модератора магазина — только почта из секрета, перебор ограничен, отклики не уходят
+        run: php tests/review_login_test.php
+
+      - name: Юпитер — заявка на браузер только при включённой службе и новой редакции
+        run: php tests/jupiter_engine_routing_test.php
+
+      - name: Юпитер — пилот «сервер отправляет сам» только по списку, с автоотправкой и поручением
+        run: php tests/jupiter_server_send_test.php
+
+      - name: Письмо компании подтверждает отклик «Скорее всего, ушёл»
+        run: php tests/jupiter_mail_confirm_test.php
+
+      - name: Пуш «ждут одного касания» — причины и предел раз в сутки
+        run: php tests/jupiter_touch_test.php
+
+      - name: Юпитер — сбой воркера не теряет заявку, трижды истёкшая аренда — человеку
+        run: php tests/jupiter_lease_expiry_test.php
+
+      - name: Неделя тишины по отклику — кому и что напоминаем
+        run: php tests/jupiter_silence_test.php
+
+      - name: Юпитер — «Ждём подтверждения» дольше 2 дней становится «Не подтвердился»
+        run: php tests/jupiter_unconfirmed_test.php
+
+      - name: Юпитер — предохранитель по сайту (пауза после «исход неизвестен» подряд)
+        run: php tests/jupiter_breaker_test.php
+
+      - name: Юпитер — согласие работодателю, данное самим человеком (один раз на текст)
+        run: php tests/employer_consent_test.php
+
+      - name: Лента карьерных вакансий — компании чередуются, свайпы учитываются
+        run: php tests/ext_feed_test.php
+
+      - name: Лента — компактный ответ первой пачки гостя (описание обрезано, companies пуст)
+        run: php tests/ext_feed_compact_test.php
+
+      - name: Лента и очередь Джу — профессия и стек вакансии против резюме (PM/PO без Java-тимлида)
+        run: php tests/ext_feed_fit_test.php
+
+      - name: Лента — вакансии, куда отклик уходит свайпом, выше «только на сайте»
+        run: php tests/ext_feed_apply_test.php
+
+      - name: Лента гостя — минутный кэш пула и копия при сбое базы
+        run: php tests/ext_feed_cache_test.php
+
+      - name: Лента гостя — короткий кэш готового ответа
+        run: php tests/feed_response_cache_test.php
+
+      - name: Лента — расчётная зарплата (перцентили, порог выборки, бета)
+        run: php tests/salary_estimate_test.php
+
+      - name: Раздел «За рубежом» — отделён от Москвы, страны переезда
+        run: php tests/abroad_feed_test.php
+
+      - name: «За рубежом» — признаки вакансий посчитаны заранее (хэш правил, миграция 224)
+        run: php tests/abroad_facets_test.php
+
+      - name: «За рубежом» — фильтр «Как работать» (удалёнка из России, глобальная, переезд, своя страна)
+        run: php tests/abroad_modes_test.php
+
+      - name: Аудит 09.10 — публичный APP_SECRET не пропуск, вебхук только с подписью
+        run: php tests/security_audit_1009_test.php
+
+      - name: Закладки карьерных вакансий — только свои, таблица закрыта RLS
+        run: php tests/ext_saved_test.php
+
+      - name: Жалоба на вакансию — причины, письмо без почты, потолок, права
+        run: php tests/vacancy_report_test.php
+
+      - name: Страница вакансии — dbGetExtVacancy открыта без входа, только активные
+        run: php tests/ext_vacancy_public_test.php
+
+      - name: Точка на конверте — непрочитанные письма почты для откликов
+        run: php tests/mail_unread_dot_test.php
+
+      - name: Уровень, формат и специализация вакансии — паритет PHP и TS
+        run: php tests/vacancy_facets_test.php
+
+      - name: Процент совпадения с резюме — паритет PHP и TS (порог отклика Джу на сервере)
+        run: php tests/match_score_test.php
+
+      - name: Разделы ленты — название вакансии ведёт в свой раздел
+        run: php tests/job_sections_test.php
+
+      - name: Проводка разделов ленты и свайпов постоянных вакансий до db.php
+        run: php tests/feed_sections_wiring_test.php
+
+      - name: Карьерная страница превращается в вакансии, а не в мусор
+        run: php tests/career_feed_test.php
+
+      - name: Полное описание вакансии со страницы сохраняет структуру
+        run: php tests/vacancy_text_test.php
+
+      - name: Дозагрузка описаний — троттлер, очередь, что пишем в карточку
+        run: php tests/describe_test.php
+
+      - name: Карточка свайпа — никуда не ведёт, листается, без плашки «Отвечает»
+        run: php tests/swipe_card_test.php
+
+      - name: Сертификат Минцифры — только три банка и только сборщик
+        run: php tests/ru_ca_scope_test.php
+
+      - name: Открытые счётчики ленты — только числа (список компаний — администратору)
+        run: php tests/feed_stats_test.php
+
+      - name: Вход в админку — общий токен, закрытый список компаний, предел попыток
+        run: php tests/admin_gate_test.php
+
+      - name: Доллары рядом с зарплатой, возраст вакансии, битый UTF-8 в ответе
+        run: php tests/fx_age_test.php
+
+      - name: Стек и английский из текста вакансии
+        run: php tests/vacancy_skills_test.php
+
+      - name: Сохранённые поиски — фильтры, тихие часы, пауза, сводка
+        run: php tests/saved_searches_test.php
+
+      - name: Страница вакансии с сайта компании — разметка, 410, без Telegram
+        run: php tests/ext_vacancy_page_test.php
+
+      - name: Пределы для гостя и скрытые служебные поля ленты
+        run: php tests/guest_limits_test.php
+
+      - name: Бюджет просмотров (защита от выгрузки)
+        run: php tests/scrape_budget_test.php
+
+      - name: Сборщик LinkedIn — разбор карточек, остановка на блокировке
+        run: python3 tests/linkedin_worker_test.py
+
+      - name: Фид LinkedIn из GitHub Actions — приём и отдача
+        run: php tests/linkedin_relay_test.php
+
+      - name: Автор сайта — карточка, фото, разметка Person
+        run: php tests/author_test.php
+
+      - name: Числа у фильтров ленты на компьютере — тот же фильтр, кэш 10 минут
+        run: php tests/feed_facets_test.php
+
+      - name: Название вакансии из карточки рядом со ссылкой
+        run: php tests/career_card_title_test.php
+
+      - name: Лента только IT — сервер, база и приложение
+        run: php tests/it_only_feed_test.php
+
+      - name: Лента только по Москве — сервер, база и счётчики
+        run: php tests/moscow_only_feed_test.php
+
+      - name: Вид работ не угадывается у постоянных вакансий («Старший смены»)
+        run: php tests/career_work_type_test.php
+
+      - name: Логотипы компаний — файлы и покрытие ленты
+        run: php tests/company_logos_test.php
+
+      - name: Описание из API источника — разделы, карточка вакансии, курсор
+        run: php tests/career_api_description_test.php
+
+      - name: Карьерная выдача — мусор не проходит, вакансии не теряются
+        run: php tests/career_quality_test.php
+
+      - name: Сбор вакансий переживает смену вёрстки — отпечаток, подбор настройки, порог
+        run: php tests/career_adapt_test.php
+
+      - name: Закрытые вакансии гаснут по сайтам, ежечасный заход по API не гасит
+        run: php tests/ingest_host_deactivation_test.php
+
+      - name: Сбойный адрес не обрывает круг сбора — закрытые гаснут
+        run: php tests/ingest_skip_unit_test.php
+
+      - name: Мёртвые ссылки вакансий (404/410) гаснут, антибот и сбои — нет
+        run: php tests/link_check_test.php
+
+      - name: Карьерный JSON разбирается по карте полей
+        run: php tests/career_json_test.php
+
+      - name: Карьерный коннектор ходит тем же методом, что записан
+        run: php tests/career_http_method_test.php
+
+      - name: Страница, присланная из inst (career_relay), разбирается как обычная
+        run: php tests/career_relay_fetch_test.php
+
+      - name: Разведка проверяет карьерный endpoint тем же кодом, что идёт на сбор
+        run: php tests/career_verify_test.php
+
+      - name: Один и тот же отклик не превращается в два
+        run: php tests/ingest_dedupe_test.php
+
+
+      - name: Объектные права чата, рейтинга и постоянного отклика
+        run: php tests/db_object_authz_test.php
+
+      - name: Удаление фото профиля — только своё, файл и ссылка
+        run: php tests/avatar_delete_test.php
+
+      - name: Писать человеку можно только тому, с кем есть связь
+        run: php tests/notify_authz_test.php
+
+      - name: Чужие данные на чтение не отдаются
+        run: php tests/read_authz_test.php
+
+      - name: Служебный токен — ограничение попыток с одного адреса
+        run: php tests/admin_throttle_test.php
+
+
+      - name: Пуш, Telegram и web-push — после ответа человеку; личные сигналы — только ему
+        run: php tests/notify_defer_test.php
+
+      - name: Ночная чистка — уведомления 90 дней, свайпы «влево» 30, отклики никогда
+        run: php tests/cleanup_test.php
+
+      - name: Письмо-сводка о непрочитанном — раз в день, без содержания, только без другого канала
+        run: php tests/unread_digest_test.php
+
+      - name: Письмо целиком — хранится при приёме, отдаётся только владельцу
+        run: php tests/mail_html_test.php
+
+      - name: Нативный push не раскрывает данные события
+        run: php tests/push_privacy_test.php
+
+      - name: Запросы к базе идут по внутреннему адресу, соединение общее, есть откат
+        run: php tests/sb_http_test.php
+
+      - name: Очередь пушей — без личного текста, с откатом на прямую отправку
+        run: php tests/push_queue_test.php
+
+      - name: Новое обращение поддержки звонит только владельцу
+        run: php tests/support_owner_notify_test.php
+
+      - name: Сигнал о поддержке для Telegram — только число и метка
+        run: php tests/support_signal_test.php
+
+
+
+      - name: Уведомление доходит и до браузера
+        run: php tests/web_push_test.php
+
+      - name: Утренний отчёт — исходы Юпитера и тревоги
+        run: php tests/daily_report_test.php
+
+      - name: Возврат по когортам регистрации
+        run: php tests/retention_report_test.php
+
+      - name: Серия заходов (дни Pro за действия подряд)
+        run: php tests/streak_test.php
+
+      - name: Письмо о откликах — правила, отписка, настройка
+        run: php tests/apply_mail_test.php
+
+
+
+      - name: Обрыв связи не выдаётся за пустоту
+        run: php tests/offline_states_test.php
+
+      # Три сторожа жестов лежали в tests/, но ни один не был подключён: они
+      # были зелёными и никогда не запускались. Поломка проводки жеста не
+      # видна ни typecheck, ни на снимках экрана — только настоящим касанием.
+      - name: Карточка в ленте листается пальцем, а не только колесом
+        run: php tests/card_scroll_test.php
+
+      - name: Свайп не тратит энергию впустую
+        run: php tests/swipe_energy_test.php
+
+      # Файл, который GitHub не может разобрать, не запускается вовсе — без
+      # единой строки лога. Так дубликат ключа в env (#526) молча остановил
+      # выкладку на сервер на 4 часа (05.10.2026).
+      - name: Workflows parse
+        run: |
+          pip install -q actionlint-py==1.7.12.25
+          # На своём исполнителе pip ставит в ~/.local, а её bin не в PATH службы.
+          PATH="$(python -m site --user-base)/bin:$PATH" actionlint -shellcheck= -pyflakes=
+      - name: nginx для проверки конфига (без него тест раньше молча пропускался)
+        run: |
+          command -v nginx >/dev/null || sudo apt-get install -y -q nginx
+          nginx -v
+
+      - name: Service worker and infrastructure syntax
+        run: |
+          node --check public/sw.js
+          bash -n infra/bootstrap.sh
+          find infra -maxdepth 1 -name '*.sh' -print0 | xargs -0 -n1 bash -n
+          python3 tests/referral_chain_test.py
+          python3 tests/referral_data_policy_test.py
+          python3 tests/resume_data_policy_test.py
+          python3 tests/user_id_contract_test.py
+          python3 tests/seo_infra_test.py
+          python3 tests/compromise_check_test.py
+          python3 tests/sitemap_invalidation_test.py
+          python3 tests/deploy_migration_order_test.py
+          python3 tests/jupiter_funnel_test.py
+          python3 tests/secret_scan_test.py
+          python3 tests/career_full_catalog_test.py
+          python3 tests/career_discover_run_test.py
+          python3 tests/deploy_webhook_order_test.py
+          python3 tests/yandex_gpt_delivery_test.py
+          python3 tests/cloud_costs_test.py
+          python3 tests/network_action_truth_test.py
+          python3 tests/eas_trigger_test.py
+          python3 tests/inst_workflows_test.py
+          python3 tests/clymly_mock_test.py
+          python3 tests/health_endpoint_test.py
+          python3 tests/server_load_infra_test.py
+          python3 tests/background_slice_test.py
+          python3 tests/studio_off_test.py
+          python3 tests/no_server_web_build_test.py
+          python3 tests/ci_runners_test.py
+          python3 tests/early_hooks_constants_test.py
+          python3 tests/auto_company_logos_test.py
+          python3 tests/upload_company_logos_test.py
+          python3 tests/telegram_link_metrics_test.py
+          python3 tests/telegram_listener_test.py
+          python3 tests/tg_poll_stuck_test.py
+          python3 tests/wipe_users_test.py
+          python3 tests/career_search_scout_test.py
+          python3 tests/career_quarantine_recheck_test.py
+          JT_REQUIRE_NGINX=1 bash tests/nginx_config_test.sh
+          python3 tests/csp_infra_test.py
+          python3 tests/nginx_log_redaction_test.py
+          python3 tests/rls_guard_test.py
+
+      # Юпитер: stdlib-тесты агента и его инфраструктура (~6 мин) — только
+      # когда менялся его участок (задание changes).
+      - name: Jupiter tests
+        if: needs.changes.outputs.jupiter_tests == 'true'
+        run: |
+          pip install quickjs
+          python3 -m py_compile jupiter/network_runtime.py jupiter/script_runtime.py jupiter/site_compat.py jupiter/validation.py jupiter/spa_payload.py jupiter/submission.py jupiter/sber.py jupiter/huntflow.py jupiter/email_apply.py jupiter/candidate.py jupiter/handoff.py jupiter/tasks.py jupiter/remote_tasks.py jupiter/run_worker.py jupiter/policy.py jupiter/engine.py jupiter/js_engine.py jupiter/agent.py jupiter/worker.py jupiter/test_server.py jupiter/recon.py jupiter/browser_engine.py jupiter/test_browser_engine.py jupiter/yandex_gpt.py jupiter/ats_hosts.py jupiter/browser_frames.py jupiter/browser_planner.py jupiter/browser_success.py jupiter/browser_sessions.py jupiter/browser_overlays.py jupiter/browser_captcha.py jupiter/browser_custom_controls.py jupiter/browser_guard.py jupiter/recon_browser.py jupiter/test_recon_reasons.py jupiter/test_browser_zoo.py jupiter/browser_limits.py jupiter/captcha_loop.py jupiter/test_sms_code.py jupiter/test_browser_engine_captcha.py jupiter/test_agent_llm.py jupiter/test_tls_trust.py jupiter/test_engine_iri.py jupiter/alice_dom.py jupiter/test_alice_dom.py jupiter/alice_agent.py jupiter/test_alice_agent.py jupiter/test_gigachat_gpt.py jupiter/live_session.py jupiter/test_live_session.py
+          (cd jupiter && python3 test_form_semantics.py)
+          (cd jupiter && python3 test_spa_payload.py)
+          (cd jupiter && python3 test_submission.py)
+          (cd jupiter && python3 test_candidate.py)
+          (cd jupiter && python3 test_safety_gate.py)
+          (cd jupiter && python3 test_handoff.py)
+          (cd jupiter && python3 test_tasks.py)
+          (cd jupiter && python3 test_remote_tasks.py)
+          (cd jupiter && python3 test_run_worker.py)
+          (cd jupiter && python3 test_mail_sync.py)
+          (cd jupiter && python3 test_sber.py)
+          (cd jupiter && python3 test_policy.py)
+          (cd jupiter && python3 test_ru_ca.py)
+          (cd jupiter && python3 test_e2e.py)
+          (cd jupiter && python3 test_recon.py)
+          (cd jupiter && python3 test_js_engine.py)
+          (cd jupiter && python3 test_yandex_gpt.py)
+          (cd jupiter && python3 test_claude_gpt.py)
+          (cd jupiter && python3 test_gigachat_gpt.py)
+          (cd jupiter && python3 test_knowledge.py)
+          (cd jupiter && python3 test_recon_reasons.py)
+          (cd jupiter && python3 test_outcome_judge.py)
+          (cd jupiter && python3 test_huntflow.py)
+          (cd jupiter && python3 test_email_apply.py)
+          (cd jupiter && python3 test_ats_hosts.py)
+          (cd jupiter && python3 test_browser_limits.py)
+          (cd jupiter && python3 test_captcha_loop.py)
+          (cd jupiter && python3 test_sms_code.py)
+          (cd jupiter && python3 test_questions.py)
+          (cd jupiter && python3 test_http_outcomes.py)
+          (cd jupiter && python3 test_submit_once.py)
+          (cd jupiter && python3 test_agent_llm.py)
+          (cd jupiter && python3 test_tls_trust.py)
+          (cd jupiter && python3 test_engine_iri.py)
+          (cd jupiter && python3 test_alice_dom.py)
+          (cd jupiter && python3 test_alice_agent.py)
+          (cd jupiter && python3 test_live_session.py)
+          python3 tests/jupiter_private_lab_infra_test.py
+          python3 tests/jupiter_browser_infra_test.py
+          python3 tests/recon_browser_infra_test.py
+          python3 tests/systemd_hardening_infra_test.py
+
+      - name: Web build
+        if: needs.changes.outputs.build == 'true'
+        env:
+          # Свой TMPDIR на задание: на своём исполнителе кэш Metro (os.tmpdir()/metro-cache)
+          # общий для всех заданий, и боевая сборка брала из него код с заглушкой
+          # example.invalid из CI — сайт и OTA остались без сервера (05.10.2026).
+          TMPDIR: ${{ runner.temp }}
+          NODE_OPTIONS: --max-old-space-size=4096
+          EXPO_PUBLIC_SUPABASE_URL: https://example.invalid
+          EXPO_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder
+          EXPO_PUBLIC_API_URL: https://example.invalid
+          EXPO_PUBLIC_APP_SECRET: ci-placeholder
+          EXPO_PUBLIC_DASHBOARD_URL: https://example.invalid
+        run: npx expo export --platform web --max-workers 2
+
+      - name: Policy сверена со сборкой (хэши инлайн-скриптов в CSP)
+        if: needs.changes.outputs.build == 'true'
+        run: node scripts/check-csp.mjs
+
+      - name: Вес картинок (WebP, лимиты в scripts/check-image-weight.mjs)
+        run: node scripts/check-image-weight.mjs
+
+      - name: Verify complete app shell
+        if: needs.changes.outputs.build == 'true'
+        run: |
+          python3 - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          from urllib.parse import urlparse
+
+          class Assets(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.urls = []
+              def handle_starttag(self, tag, attrs):
+                  values = dict(attrs)
+                  for key in ('src', 'href'):
+                      value = values.get(key, '')
+                      if value.startswith('/_expo/static/') or value.startswith('/assets/'):
+                          self.urls.append(urlparse(value).path.lstrip('/'))
+
+          root = Path('dist')
+          html = (root / 'index.html').read_text()
+          parser = Assets()
+          parser.feed(html)
+          missing = [url for url in parser.urls if not (root / url).is_file()]
+          if not parser.urls:
+              raise SystemExit('index.html has no app assets')
+          if missing:
+              raise SystemExit('missing app assets: ' + ', '.join(missing))
+          print(f'complete shell: {len(parser.urls)} referenced assets')
+          PY
+
+  # Браузерный движок Юпитера (решение владельца 28.09.2026): Chromium через
+  # Python-Playwright. Отдельная задача — основной Юпитер остаётся на stdlib,
+  # а браузер ставится только здесь. Версия закреплена.
+  jupiter-browser:
+    name: Jupiter browser engine
+    needs: changes
+    if: needs.changes.outputs.jupiter == 'true'
+    runs-on: ubuntu-latest # 12.11.2026: проверки вынесены с боевого сервера (решение владельца), вернуть — [self-hosted, selectel-ci]
+    timeout-minutes: 15
+    steps:
+      - name: Код закрытого репозитория (токен только на чтение)
+        env:
+          SRC_TOKEN: ${{ secrets.SRC_READ_TOKEN }}
+          SRC_REF: ${{ inputs.ref || 'main' }}
+          SRC_BASE: ${{ inputs.base }}
+        run: |
+          git init -q .
+          hdr="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$SRC_TOKEN" | base64 -w0)"
+          git -c http.extraheader="$hdr" fetch -q --depth=300 https://github.com/nikidav9/Jobbbrbeb.git "$SRC_REF" ${SRC_BASE:+"$SRC_BASE"}
+          git checkout -q --detach FETCH_HEAD
+          git log -1 --format='commit %h'
+      # Python — тот, что стоит на сервере сборки, как у основной задачи: скачивание
+      # actions/setup-python с GitHub обрывалось по таймауту и роняло задачу до
+      # первого теста (19.10.2026).
+      - name: Install Playwright + Chromium
+        run: |
+          python3 --version
+          pip install playwright==1.63.0
+          python3 -m playwright install chromium
+      - name: Browser engine on a synthetic heavy career site
+        env:
+          JUPITER_BROWSER_TESTS: '1'
+        run: |
+          cd jupiter
+          for t in test_browser_engine test_browser_frames test_browser_planner test_browser_success \
+                   test_browser_sessions test_browser_overlays test_browser_captcha \
+                   test_browser_custom_controls test_browser_guard test_recon_browser test_browser_zoo \
+                   test_browser_engine_captcha test_alice_dom test_alice_agent; do
+            echo "== $t"; python3 $t.py
+          done
+
+  dashboard:
+    name: Dashboard build
+    needs: changes
+    if: needs.changes.outputs.dashboard == 'true'
+    runs-on: ubuntu-latest # 12.11.2026: проверки вынесены с боевого сервера (решение владельца), вернуть — [self-hosted, selectel-ci]
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - name: Код закрытого репозитория (токен только на чтение)
+        env:
+          SRC_TOKEN: ${{ secrets.SRC_READ_TOKEN }}
+          SRC_REF: ${{ inputs.ref || 'main' }}
+          SRC_BASE: ${{ inputs.base }}
+        run: |
+          git init -q .
+          hdr="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$SRC_TOKEN" | base64 -w0)"
+          git -c http.extraheader="$hdr" fetch -q --depth=300 https://github.com/nikidav9/Jobbbrbeb.git "$SRC_REF" ${SRC_BASE:+"$SRC_BASE"}
+          git checkout -q --detach FETCH_HEAD
+          git log -1 --format='commit %h'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        env:
+          ADMIN_API_URL: https://example.invalid/api/admin.php
+          EXPO_PUBLIC_APP_SECRET: ci-placeholder
+          ADMIN_API_TOKEN: ci-placeholder
+          VAPID_PUBLIC_KEY: ci-placeholder
+          VAPID_PRIVATE_KEY: ci-placeholder
+          VAPID_SUBJECT: mailto:ci@example.invalid
+        run: npm run build
