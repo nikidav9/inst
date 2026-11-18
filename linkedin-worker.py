@@ -6,8 +6,8 @@
   * только поля самой вакансии: название, компания, город, дата, ссылка. Данные
     рекрутёров не берём и не храним;
   * честный User-Agent (под браузер не маскируемся), пауза между запросами, потолок
-    запросов за запуск; с 12.11.2026 список поисков делится на 8 кусков, каждый запуск (раз в 3 часа)
-    берёт свой, за сутки ~96 запросов;
+    запросов за запуск; с 12.11.2026 список поисков делится на куски, каждый запуск (раз в 3 часа)
+    берёт свой (с 18.11.2026 кусков 10, ≤ 30 запросов в каждом, весь список проходит за ~30 часов);
   * первая же блокировка (429/999/403, страница входа) останавливает запуск, прошлый
     фид остаётся как был.
 Только стандартная библиотека. Результат: LINKEDIN_FEED (nginx отдаёт его как
@@ -43,40 +43,53 @@ RU_KEYWORDS = [
     "business analyst", "hr manager",
 ]
 RU_PLACES = ["Russia", "Moscow"]
+# 18.11.2026 (решение владельца): города-миллионники, по 1 странице на профессию. Без них российская
+# лента получала единицы вакансий LinkedIn: поиск «Russia»/«Moscow» отдаёт в основном Москву.
+RU_CITIES = [
+    "Saint Petersburg, Russia", "Novosibirsk, Russia", "Yekaterinburg, Russia", "Kazan, Russia",
+    "Nizhny Novgorod, Russia", "Samara, Russia", "Krasnodar, Russia", "Rostov-on-Don, Russia",
+    "Ufa, Russia", "Krasnoyarsk, Russia", "Perm, Russia", "Voronezh, Russia",
+    "Chelyabinsk, Russia", "Omsk, Russia", "Volgograd, Russia",
+]
 ABROAD_KEYWORDS = ["python developer", "frontend developer", "product manager", "data analyst", "qa engineer", "project manager"]
 ABROAD_PLACES = [
     "Cyprus", "Tbilisi, Georgia", "Yerevan, Armenia", "Belgrade, Serbia",
     "Almaty, Kazakhstan", "Istanbul, Turkey", "Dubai, United Arab Emirates", "Berlin, Germany",
 ]
 RU_PAGES = 2                 # по 25 карточек на страницу
+RU_CITY_PAGES = 1
 ABROAD_PAGES = 1
-PAUSE_SEC = 8.0              # между запросами; реальная пауза 1,0-1,5 от этого значения
-MAX_REQUESTS = 12            # потолок за запуск
-SLOTS = 8                    # запусков в сутки (каждые 3 часа): за сутки проходит весь список
+PAUSE_SEC = 8.0              # между запросами; реальная пауза 1,0-1,5 от этого значения (в среднем ~10 с)
+MAX_REQUESTS = 30            # потолок за запуск: ~5 минут при паузе 8-12 с, в окне 20 минут workflow
 MAX_AGE = "r2592000"         # за месяц
 
 
 def pages() -> list:
-    """Весь список страниц поиска: (слова, место, region, start). Российские и зарубежные поиски чередуются
-    (на один российский — два зарубежных), чтобы каждый кусок списка, то есть каждый запуск, брал и то и другое."""
+    """Весь список страниц поиска: (слова, место, region, start). Три группы: российские (Россия/Москва),
+    города-миллионники и зарубежные. Группы перемешаны пропорционально размеру, поэтому каждый кусок списка,
+    то есть каждый запуск, берёт понемногу из всех трёх. Порядок стабилен: от него зависит ротация."""
     ru = [[(kw, loc, "ru", p * 25) for p in range(RU_PAGES)] for kw in RU_KEYWORDS for loc in RU_PLACES]
+    cities = [[(kw, loc, "ru", p * 25) for p in range(RU_CITY_PAGES)] for loc in RU_CITIES for kw in RU_KEYWORDS]
     ab = [[(kw, loc, "abroad", p * 25) for p in range(ABROAD_PAGES)] for kw in ABROAD_KEYWORDS for loc in ABROAD_PLACES]
-    out = []
-    for i, group in enumerate(ru):
-        out += group
-        for g in ab[2 * i:2 * i + 2]:
-            out += g
-    for g in ab[2 * len(ru):]:      # если зарубежных больше, чем вмещает чередование
-        out += g
-    return out
+    keyed = []
+    for gi, groups in enumerate((ru, cities, ab)):
+        flat = [x for g in groups for x in g]        # страницы одного поиска остаются подряд
+        for i, item in enumerate(flat):
+            keyed.append(((i + 0.5) / len(flat), gi, i, item))
+    keyed.sort(key=lambda k: k[:3])
+    return [k[3] for k in keyed]
+
+
+SLOTS = -(-len(pages()) // MAX_REQUESTS)   # кусков в круге: запуск раз в 3 часа, круг SLOTS * 3 часа
 
 
 def current_slot(now: float = None) -> int:
-    """Номер куска списка для этого запуска. LINKEDIN_SLOT задаёт вручную; иначе по часу UTC (запуски в 0, 3, 6 ... ч)."""
+    """Номер куска списка для этого запуска. LINKEDIN_SLOT задаёт вручную; иначе по номеру трёхчасового окна
+    от начала эпохи: куски идут по кругу подряд (запуски в 0, 3, 6 ... ч UTC), круг не привязан к суткам."""
     env = os.environ.get("LINKEDIN_SLOT", "")
     if env.strip().isdigit():
         return int(env) % SLOTS
-    return int((now if now is not None else time.time()) // 3600 // (24 // SLOTS)) % SLOTS
+    return int((now if now is not None else time.time()) // (3 * 3600)) % SLOTS
 
 
 def todays_slice(slot: int) -> list:
