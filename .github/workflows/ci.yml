@@ -63,6 +63,7 @@ jobs:
             find "$GITHUB_WORKSPACE" -mindepth 1 -delete
           fi
       - name: Код закрытого репозитория (токен только на чтение)
+        working-directory: .   # у задания Dashboard рабочая папка dashboard, её ещё нет
         env:
           SRC_TOKEN: ${{ secrets.SRC_READ_TOKEN }}
           IN_REF: ${{ inputs.ref }}
@@ -121,6 +122,7 @@ jobs:
             find "$GITHUB_WORKSPACE" -mindepth 1 -delete
           fi
       - name: Код закрытого репозитория (токен только на чтение)
+        working-directory: .   # у задания Dashboard рабочая папка dashboard, её ещё нет
         env:
           SRC_TOKEN: ${{ secrets.SRC_READ_TOKEN }}
           IN_REF: ${{ inputs.ref }}
@@ -963,6 +965,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Код закрытого репозитория (токен только на чтение)
+        working-directory: .   # у задания Dashboard рабочая папка dashboard, её ещё нет
         env:
           SRC_TOKEN: ${{ secrets.SRC_READ_TOKEN }}
           IN_REF: ${{ inputs.ref }}
@@ -1008,6 +1011,7 @@ jobs:
         working-directory: dashboard
     steps:
       - name: Код закрытого репозитория (токен только на чтение)
+        working-directory: .   # у задания Dashboard рабочая папка dashboard, её ещё нет
         env:
           SRC_TOKEN: ${{ secrets.SRC_READ_TOKEN }}
           IN_REF: ${{ inputs.ref }}
