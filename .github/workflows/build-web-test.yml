@@ -33,7 +33,10 @@ jobs:
       sha: ${{ steps.pick.outputs.sha }}
       build: ${{ steps.pick.outputs.build }}
     steps:
+      # persist-credentials: false — иначе в git остаётся токен самого inst и мешает читать закрытый репозиторий («Repository not found»).
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - id: pick
         env:
           SRC_TOKEN: ${{ secrets.SRC_READ_TOKEN }}
@@ -46,7 +49,7 @@ jobs:
           hdr="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$SRC_TOKEN" | base64 -w0)"
           src="https://github.com/nikidav9/Jobbbrbeb.git"
           sha=""
-          if [ "$EVENT" = push ]; then sha=$(tail -n1 web-build-now | awk '{print $NF}'); fi
+          if [ "$EVENT" = push ]; then sha=$(tail -n1 web-build-test-now | awk '{print $NF}'); fi
           [ -z "$sha" ] && sha="$IN_REF"
           if [ -z "$sha" ]; then sha=$(git -c http.extraheader="$hdr" ls-remote "$src" refs/heads/main | cut -f1); fi
           if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{40}$'; then echo "коммит не определён"; echo "build=false" >> "$GITHUB_OUTPUT"; exit 0; fi
@@ -209,6 +212,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: web-build

@@ -35,7 +35,10 @@ jobs:
       sha: ${{ steps.pick.outputs.sha }}
       build: ${{ steps.pick.outputs.build }}
     steps:
+      # persist-credentials: false — иначе в git остаётся токен самого inst и мешает читать закрытый репозиторий («Repository not found»).
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - id: pick
         env:
           SRC_TOKEN: ${{ secrets.SRC_READ_TOKEN }}
@@ -211,6 +214,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: web-build
