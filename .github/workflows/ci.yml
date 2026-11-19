@@ -781,6 +781,9 @@ jobs:
       - name: Серия заходов (дни Pro за действия подряд)
         run: php tests/streak_test.php
 
+      - name: Лестница возврата — ступени, окна времени, лимиты, тексты
+        run: php tests/comeback_push_test.php
+
       - name: Письмо о откликах — правила, отписка, настройка
         run: php tests/apply_mail_test.php
 
