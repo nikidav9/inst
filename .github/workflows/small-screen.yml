@@ -1,0 +1,120 @@
+# Файл собран scripts/make-inst-ci.py из .github/workflows/small-screen.yml — не править руками.
+# Лежит в публичном nikidav9/inst (минуты закрытого Jobbbrbeb кончились, 18.11.2026).
+# Нужен секрет SRC_READ_TOKEN — как у ci.yml. Запуск вместе с ci.yml: строка в ci-now.
+name: Small-screen layout
+
+# Только на PR, как CI (решение владельца 06.10.2026): повтор после мержа
+# занимал исполнитель, пока выкат ждал в очереди.
+on:
+  push:
+    paths: [ci-now]   # запуск строкой в ci-now вместе с ci.yml; сообщение коммита «ci: ветка [база]»
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: ветка или коммит закрытого репозитория (по умолчанию main)
+        default: main
+      base:
+        description: коммит, с которым сравнить (пусто — всё целиком)
+        default: ''
+permissions:
+  contents: read
+
+concurrency:
+  group: small-screen-${{ inputs.ref || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  layout:
+    name: Chromium 320/360 px
+    runs-on: ubuntu-latest # 12.11.2026: проверки вынесены с боевого сервера, как в ci.yml
+    # 30, а не 20 (01.10.2026): установка Chromium с зависимостями однажды
+    # заняла 11 минут вместо одной, и проверку раскладки сняло по сроку на 7-й
+    # минуте без единой ошибки.
+    timeout-minutes: 30
+    steps:
+      - name: Код закрытого репозитория (токен только на чтение)
+        working-directory: .   # у задания Dashboard рабочая папка dashboard, её ещё нет
+        env:
+          SRC_TOKEN: ${{ secrets.SRC_READ_TOKEN }}
+          IN_REF: ${{ inputs.ref }}
+          IN_BASE: ${{ inputs.base }}
+          MSG: ${{ github.event.head_commit.message }}
+        run: |
+          # Запуск пушем строки в ci-now: сообщение коммита «ci: <ветка> [<с чем сравнить>]».
+          SRC_REF="${IN_REF:-$(printf '%s' "$MSG" | sed -n '1s/^ci: *\([^ ]*\).*/\1/p')}"; SRC_REF="${SRC_REF:-main}"
+          SRC_BASE="${IN_BASE:-$(printf '%s' "$MSG" | sed -n '1s/^ci: *[^ ]* *\([^ ]*\).*/\1/p')}"
+          git init -q .
+          hdr="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$SRC_TOKEN" | base64 -w0)"
+          git -c http.extraheader="$hdr" fetch -q --depth=300 https://github.com/nikidav9/Jobbbrbeb.git "$SRC_REF" ${SRC_BASE:+"$SRC_BASE"}
+          git checkout -q --detach FETCH_HEAD
+          git log -1 --format='commit %h'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - name: Install app dependencies
+        run: npm ci
+
+      # Playwright нужен только этому browser-guard. Не тащим браузер в
+      # production dependencies и не меняем lockfile ради CI-инструмента.
+      # Версия закреплена; случайный latest не может сломать проверку ночью.
+      # 1.63 — как у браузера Юпитера в ci.yml: 1.51 не знает Ubuntu 26.04
+      # на своём исполнителе jobtoo-ci (05.10.2026).
+      - name: Install pinned browser harness
+        run: |
+          # Ставим в отдельную папку и подключаем ссылками: так npm не пересобирает
+          # дерево зависимостей приложения заново (16.11.2026 это падало с E404 на
+          # несуществующей транзитивной версии @typescript-eslint/types).
+          PW_DIR="$RUNNER_TEMP/pw"
+          mkdir -p "$PW_DIR"
+          (cd "$PW_DIR" && npm init -y >/dev/null && npm install --no-audit --no-fund playwright@1.63.0)
+          ln -sfn "$PW_DIR/node_modules/playwright" node_modules/playwright
+          ln -sfn "$PW_DIR/node_modules/playwright-core" node_modules/playwright-core
+          "$PW_DIR/node_modules/.bin/playwright" install chromium
+
+      - name: Build web app for layout test
+        env:
+          # Свой TMPDIR на задание: на своём исполнителе кэш Metro (os.tmpdir()/metro-cache)
+          # общий для всех заданий, и боевая сборка брала из него код с заглушкой
+          # example.invalid из CI — сайт и OTA остались без сервера (05.10.2026).
+          TMPDIR: ${{ runner.temp }}
+          NODE_OPTIONS: --max-old-space-size=4096
+          EXPO_PUBLIC_SUPABASE_URL: https://example.invalid
+          EXPO_PUBLIC_SUPABASE_ANON_KEY: small-screen-placeholder
+          EXPO_PUBLIC_API_URL: https://example.invalid
+          EXPO_PUBLIC_APP_SECRET: small-screen-placeholder
+          EXPO_PUBLIC_DASHBOARD_URL: https://example.invalid
+        run: npx expo export --platform web --max-workers 2
+
+      # Флаг нужен, чтобы сторож импортировал настоящий constants/legal.ts:
+      # штамп согласия должен приезжать из кода, а не копией в скрипте.
+      - name: Check rendered narrow layouts
+        run: >-
+          node --experimental-strip-types
+          --disable-warning=MODULE_TYPELESS_PACKAGE_JSON
+          scripts/check-small-screens.mjs
+
+      # Дымовой обход всех экранов из app/ (гость и работник, 390 px): падения
+      # страницы, TypeError в консоли, белый экран, горизонтальная прокрутка.
+      - name: Smoke all routes
+        run: >-
+          node --experimental-strip-types
+          --disable-warning=MODULE_TYPELESS_PACKAGE_JSON
+          scripts/smoke-routes.mjs
+
+      # Поиск в ленте: фокус не должен слетать на каждой букве (Android, 12.11.2026).
+      - name: Feed search keeps focus while typing
+        run: node scripts/check-feed-search-focus.mjs
+
+      - name: Upload failure screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: small-screen-${{ github.run_id }}
+          path: |
+            .small-screen-artifacts/
+            .smoke-routes-artifacts/
+          if-no-files-found: warn
+          retention-days: 14

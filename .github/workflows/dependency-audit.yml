@@ -1,0 +1,125 @@
+# Файл собран scripts/make-inst-ci.py из .github/workflows/dependency-audit.yml — не править руками.
+# Лежит в публичном nikidav9/inst (минуты закрытого Jobbbrbeb кончились, 18.11.2026).
+# Нужен секрет SRC_READ_TOKEN — как у ci.yml. Запуск вместе с ci.yml: строка в ci-now.
+name: Dependency security audit
+
+on:
+  push:
+    paths: [ci-now]   # запуск строкой в ci-now вместе с ci.yml; сообщение коммита «ci: ветка [база]»
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: ветка или коммит закрытого репозитория (по умолчанию main)
+        default: main
+      base:
+        description: коммит, с которым сравнить (пусто — всё целиком)
+        default: ''
+  schedule:
+    - cron: '17 4 * * 1'   # понедельник, как в закрытом репозитории
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-audit-${{ inputs.ref || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  app-production:
+    name: App production dependencies
+    # 14.11.2026 (аудит безопасности): на pull_request здесь исполняется `npm ci` кода PR — это не место
+    # для боевого исполнителя selectel-ci (там секреты и сайт). Бесплатный раннер GitHub, права только на чтение.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Код закрытого репозитория (токен только на чтение)
+        working-directory: .   # у задания Dashboard рабочая папка dashboard, её ещё нет
+        env:
+          SRC_TOKEN: ${{ secrets.SRC_READ_TOKEN }}
+          IN_REF: ${{ inputs.ref }}
+          IN_BASE: ${{ inputs.base }}
+          MSG: ${{ github.event.head_commit.message }}
+        run: |
+          # Запуск пушем строки в ci-now: сообщение коммита «ci: <ветка> [<с чем сравнить>]».
+          SRC_REF="${IN_REF:-$(printf '%s' "$MSG" | sed -n '1s/^ci: *\([^ ]*\).*/\1/p')}"; SRC_REF="${SRC_REF:-main}"
+          SRC_BASE="${IN_BASE:-$(printf '%s' "$MSG" | sed -n '1s/^ci: *[^ ]* *\([^ ]*\).*/\1/p')}"
+          git init -q .
+          hdr="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$SRC_TOKEN" | base64 -w0)"
+          git -c http.extraheader="$hdr" fetch -q --depth=300 https://github.com/nikidav9/Jobbbrbeb.git "$SRC_REF" ${SRC_BASE:+"$SRC_BASE"}
+          git checkout -q --detach FETCH_HEAD
+          git log -1 --format='commit %h'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - name: Build machine-readable report
+        run: |
+          npm audit --omit=dev --json > app-production-audit.json || true
+          node - <<'NODE'
+          const fs = require('node:fs')
+          const report = JSON.parse(fs.readFileSync('app-production-audit.json', 'utf8'))
+          const meta = report.metadata?.vulnerabilities ?? {}
+          console.log('Production vulnerabilities:', JSON.stringify(meta))
+          for (const [name, item] of Object.entries(report.vulnerabilities ?? {})) {
+            console.log(`${item.severity}\t${name}\tdirect=${Boolean(item.isDirect)}\tfix=${JSON.stringify(item.fixAvailable)}`)
+          }
+          NODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-production-audit
+          path: app-production-audit.json
+          retention-days: 30
+      - name: Block critical production vulnerabilities
+        run: npm audit --omit=dev --audit-level=critical
+
+  dashboard-production:
+    name: Dashboard production dependencies
+    # 14.11.2026 (аудит безопасности): на pull_request здесь исполняется `npm ci` кода PR — это не место
+    # для боевого исполнителя selectel-ci (там секреты и сайт). Бесплатный раннер GitHub, права только на чтение.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - name: Код закрытого репозитория (токен только на чтение)
+        working-directory: .   # у задания Dashboard рабочая папка dashboard, её ещё нет
+        env:
+          SRC_TOKEN: ${{ secrets.SRC_READ_TOKEN }}
+          IN_REF: ${{ inputs.ref }}
+          IN_BASE: ${{ inputs.base }}
+          MSG: ${{ github.event.head_commit.message }}
+        run: |
+          # Запуск пушем строки в ci-now: сообщение коммита «ci: <ветка> [<с чем сравнить>]».
+          SRC_REF="${IN_REF:-$(printf '%s' "$MSG" | sed -n '1s/^ci: *\([^ ]*\).*/\1/p')}"; SRC_REF="${SRC_REF:-main}"
+          SRC_BASE="${IN_BASE:-$(printf '%s' "$MSG" | sed -n '1s/^ci: *[^ ]* *\([^ ]*\).*/\1/p')}"
+          git init -q .
+          hdr="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$SRC_TOKEN" | base64 -w0)"
+          git -c http.extraheader="$hdr" fetch -q --depth=300 https://github.com/nikidav9/Jobbbrbeb.git "$SRC_REF" ${SRC_BASE:+"$SRC_BASE"}
+          git checkout -q --detach FETCH_HEAD
+          git log -1 --format='commit %h'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+      - name: Build machine-readable report
+        run: |
+          npm audit --omit=dev --json > dashboard-production-audit.json || true
+          node - <<'NODE'
+          const fs = require('node:fs')
+          const report = JSON.parse(fs.readFileSync('dashboard-production-audit.json', 'utf8'))
+          const meta = report.metadata?.vulnerabilities ?? {}
+          console.log('Production vulnerabilities:', JSON.stringify(meta))
+          for (const [name, item] of Object.entries(report.vulnerabilities ?? {})) {
+            console.log(`${item.severity}\t${name}\tdirect=${Boolean(item.isDirect)}\tfix=${JSON.stringify(item.fixAvailable)}`)
+          }
+          NODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-production-audit
+          path: dashboard/dashboard-production-audit.json
+          retention-days: 30
+      - name: Block critical production vulnerabilities
+        run: npm audit --omit=dev --audit-level=critical
