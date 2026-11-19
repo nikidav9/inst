@@ -1,0 +1,228 @@
+# Сборка сайта вынесена с боевого сервера в публичный nikidav9/inst (20.11.2026, решение владельца: сервер задыхался
+# от сборок — нагрузка до 19 на 4 ядрах, таймауты и 502). Источник правды — infra/inst/build-web.yml в закрытом репозитории,
+# в inst лежит копия (рядом — release-upload.sh). Нужны секреты inst: SRC_READ_TOKEN (чтение закрытого кода, как у CI) и
+# EXPO_PUBLIC_* — значения, которые и так вшиты в готовый сайт, личных данных и данных оплаты среди них нет.
+# Секреты сервера (ЮKassa, админский токен, Telegram и т. д.) сюда не попадают никогда: их доставляет закрытый deploy-regru.
+# Сервер забирает архив из публичного релиза `web` этого репозитория, когда в закрытом infra/web-source стоит «inst».
+name: Сборка сайта (ТЕСТ, пустышки)
+
+on:
+  push:
+    paths: [web-build-test-now]   # запуск строкой в web-build-now: «<время> <sha коммита main закрытого репозитория>»
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: коммит закрытого репозитория (по умолчанию — сейчас на main)
+        default: ''
+
+permissions:
+  contents: read
+
+# Нужна только самая свежая сборка: старую безопасно отменять.
+concurrency:
+  group: web-build-test
+  cancel-in-progress: true
+
+jobs:
+  # Что собирать: коммит из строки/ввода или текущий main; пропуск, если он уже собран или изменились только документы.
+  plan:
+    name: What to build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.pick.outputs.sha }}
+      build: ${{ steps.pick.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: pick
+        env:
+          SRC_TOKEN: ${{ secrets.SRC_READ_TOKEN }}
+          API_URL: https://jobtoo.ru/api
+          IN_REF: ${{ inputs.ref }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          # Пока значения для сборки (секреты EXPO_PUBLIC_*) не заведены, сборку не начинаем и красным не пугаем.
+          if [ -z "$API_URL" ] || [ -z "$SRC_TOKEN" ]; then echo "секреты для сборки не заведены (EXPO_PUBLIC_*, SRC_READ_TOKEN) — сборка отключена"; echo "build=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          hdr="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$SRC_TOKEN" | base64 -w0)"
+          src="https://github.com/nikidav9/Jobbbrbeb.git"
+          sha=""
+          if [ "$EVENT" = push ]; then sha=$(tail -n1 web-build-now | awk '{print $NF}'); fi
+          [ -z "$sha" ] && sha="$IN_REF"
+          if [ -z "$sha" ]; then sha=$(git -c http.extraheader="$hdr" ls-remote "$src" refs/heads/main | cut -f1); fi
+          if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{40}$'; then echo "коммит не определён"; echo "build=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          built=$(curl -fsSL -m 30 "https://github.com/${GITHUB_REPOSITORY}/releases/download/web-test/build.json" 2>/dev/null | jq -r '.sha // empty' 2>/dev/null || true)
+          if [ "$built" = "$sha" ]; then echo "коммит $sha уже собран"; echo "build=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          # По расписанию и вручную без явного коммита собираем, только если изменилось что-то кроме документов.
+          if [ "$EVENT" != push ] && [ -n "$built" ]; then
+            git init -q work && cd work
+            if git -c http.extraheader="$hdr" fetch -q --depth=200 "$src" "$sha" "$built" 2>/dev/null; then
+              files=$(git -c core.quotepath=off diff --name-only "$built" "$sha" || true)
+              if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qvE '^(docs/|[^/]*\.md$|\.gitignore$)'; then
+                echo "изменились только документы — собирать нечего"; echo "build=false" >> "$GITHUB_OUTPUT"; exit 0
+              fi
+            fi
+          fi
+          echo "build=true" >> "$GITHUB_OUTPUT"
+          echo "будет собран коммит $sha"
+
+  build:
+    name: Сборка сайта
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Код закрытого репозитория (токен только на чтение)
+        env:
+          SRC_TOKEN: ${{ secrets.SRC_READ_TOKEN }}
+          SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          git init -q .
+          hdr="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$SRC_TOKEN" | base64 -w0)"
+          git -c http.extraheader="$hdr" fetch -q --depth=1 https://github.com/nikidav9/Jobbbrbeb.git "$SHA"
+          git checkout -q --detach FETCH_HEAD
+          git log -1 --format='коммит %h'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Which build values arrived
+        env:
+          U: https://example.invalid
+          K: dummy-anon
+          A: https://jobtoo.ru/api
+          S: dummy-secret
+        run: |
+          say() { [ -n "$2" ] && echo "$1: задан" || echo "$1: ПУСТО"; }
+          say EXPO_PUBLIC_SUPABASE_URL "$U"
+          say EXPO_PUBLIC_SUPABASE_ANON_KEY "$K"
+          say EXPO_PUBLIC_API_URL "$A"
+          say EXPO_PUBLIC_APP_SECRET "$S"
+          # Пустое значение вшилось бы в сайт и сломало его, поэтому без значений сборку не начинаем.
+          [ -n "$U" ] && [ -n "$K" ] && [ -n "$A" ] && [ -n "$S" ] || { echo "нет значений для сборки: добавьте секреты EXPO_PUBLIC_* в inst"; exit 1; }
+
+      - name: Build Expo web
+        run: npx expo export --platform web --max-workers 2 --clear
+        env:
+          EXPO_PUBLIC_SUPABASE_URL: https://example.invalid
+          EXPO_PUBLIC_SUPABASE_ANON_KEY: dummy-anon
+          EXPO_PUBLIC_API_URL: https://jobtoo.ru/api
+          EXPO_PUBLIC_APP_SECRET: dummy-secret
+          EXPO_PUBLIC_DASHBOARD_URL: https://admin.jobtoo.ru
+          EXPO_PUBLIC_YANDEX_MAPS_KEY: dummy-maps
+
+      - name: Replace favicon
+        run: cp assets/images/favicon.ico dist/favicon.ico
+
+      # Шрифты не трогаем (решение владельца 14.11.2026): шаг тот же, что в deploy-regru.
+      - name: Trim font preload
+        run: node scripts/trim-font-preload.mjs dist
+
+      # Политика скриптов боевая: инлайн-скрипт сборки, которого нет в script-src, повесит сайт на заставке.
+      - name: Verify CSP hashes of this build
+        run: node scripts/check-csp.mjs
+
+      # Серверная сборка главной (docs/ssr-главной.md): не обязательна, ошибка не роняет выкладку.
+      - name: Build SSR home (optional)
+        continue-on-error: true
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+          EXPO_PUBLIC_SUPABASE_URL: https://example.invalid
+          EXPO_PUBLIC_SUPABASE_ANON_KEY: dummy-anon
+          EXPO_PUBLIC_API_URL: https://jobtoo.ru/api
+          EXPO_PUBLIC_APP_SECRET: dummy-secret
+          EXPO_PUBLIC_DASHBOARD_URL: https://admin.jobtoo.ru
+          EXPO_PUBLIC_YANDEX_MAPS_KEY: dummy-maps
+        run: |
+          rm -rf dist-ssr
+          EXPO_PUBLIC_JT_SSR=1 JT_SSR=1 npx expo export --platform web --max-workers 2 --clear --output-dir dist-ssr
+          test -f dist-ssr/server/_expo/routes.json
+          # Сливаем в готовый dist только после успешной сборки: хэш-имена не пересекаются, существующие файлы не затираются.
+          cp -r --update=none dist-ssr/client/_expo/. dist/_expo/
+          cp -r dist-ssr/server dist/ssr-server
+          mkdir -p dist/ssr-server/node_modules dist/_jt
+          cp -r node_modules/expo-server dist/ssr-server/node_modules/
+          cp infra/ssr-home/seed.js infra/ssr-home/ssr-path.js dist/_jt/
+          rm -rf dist-ssr
+          echo "серверная сборка главной добавлена в архив"
+
+      - name: Verify same-origin static assets
+        run: |
+          if grep -R "j8a6jds2at.cdn.twcstorage.ru" dist --include='*.html'; then
+            echo "Обнаружена ссылка на отключённый Timeweb CDN"
+            exit 1
+          fi
+
+      # Архив уйдёт в ПУБЛИЧНЫЙ релиз. Кладём только то, что и так отдаёт сайт: без карт исходного кода, без файлов
+      # окружения, без серверных папок api и .htaccess; перед упаковкой ищем в архиве следы секретов (печатаем только число
+      # совпадений, не содержимое).
+      - name: Pack web build
+        env:
+          SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          sudo apt-get install -y -qq brotli >/dev/null
+          rm -rf pack && mkdir pack
+          cp -a dist/. pack/
+          rm -rf pack/api pack/.htaccess
+          maps=$(find pack -name '*.map' | wc -l); find pack -name '*.map' -delete
+          find pack \( -name '.env' -o -name '.env.*' \) -delete
+          echo "карт исходного кода убрано: $maps"
+          hits=$(grep -rIlE 'BEGIN (RSA |EC |OPENSSH |)PRIVATE KEY|YOOKASSA_SECRET|ADMIN_API_TOKEN|JT_DEPLOY_TOKEN|GH_READ_TOKEN|SRC_READ_TOKEN|ghp_[A-Za-z0-9]{20}|github_pat_[A-Za-z0-9_]{20}' pack | wc -l)
+          echo "файлов со следами секретов: $hits"
+          [ "$hits" = 0 ] || { echo "в архиве найдены следы секретов — публикация остановлена"; exit 1; }
+          printf '{"sha":"%s","deployed_at":"%s","builder":"github-actions-inst"}\n' \
+            "$SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > pack/jobtoo-build.json
+          # Сжимаем статику заранее (25.10.2026): nginx отдаёт .gz/.br как есть (gzip_static/brotli_static).
+          find pack -type f \( -name '*.js' -o -name '*.css' -o -name '*.html' \
+            -o -name '*.json' -o -name '*.svg' -o -name '*.txt' -o -name '*.ttf' \) ! -name 'jobtoo-build.json' -size +1024c -print0 \
+            | while IFS= read -r -d '' f; do
+                gzip -9 -k -f "$f"
+                if command -v brotli >/dev/null 2>&1; then brotli -q 11 -k -f "$f"; fi
+              done
+          echo "предсжато: .gz $(find pack -name '*.gz' | wc -l), .br $(find pack -name '*.br' | wc -l)"
+          tar -czf dist.tar.gz -C pack .
+          printf '{"sha":"%s","built_at":"%s"}\n' "$SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > build.json
+          ls -l dist.tar.gz build.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-build
+          path: |
+            dist.tar.gz
+            build.json
+          retention-days: 3
+
+  # Публикация отдельным заданием: право записи в репозиторий есть только здесь, а секретов у задания нет —
+  # код сборки (npm-пакеты) право записи не видит.
+  publish:
+    name: Публикация релиза
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-build
+      - name: Publish release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist.tar.gz build.json
+          # Сначала архив, потом build.json: по build.json план определяет, что уже собрано.
+          for f in dist.tar.gz build.json; do
+            ok=0
+            for attempt in 1 2 3; do
+              if bash release-upload.sh web-test "$f" "Веб-сборка" "Собирается автоматически из закрытого репозитория. Сервер забирает отсюда dist.tar.gz."; then ok=1; break; fi
+              echo "Публикация $f: попытка $attempt не удалась"; sleep $((attempt * 3))
+            done
+            [ "$ok" = 1 ]
+          done
